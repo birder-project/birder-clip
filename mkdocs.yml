@@ -1,0 +1,23 @@
+site_name: Birder CLIP
+site_dir: public/
+repo_url: https://gitlab.com/birder/birder-clip
+
+nav:
+  - Home: README.md
+
+theme:
+  name: readthedocs
+  color_mode: auto
+
+extra:
+  social:
+    - icon: fontawesome/brands/gitlab
+      link: https://gitlab.com/birder/birder-clip
+
+markdown_extensions:
+  - footnotes
+
+plugins:
+  - exclude:
+      glob:
+        - internal/* # Just bloats the documentation
