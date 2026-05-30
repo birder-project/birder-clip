@@ -1,0 +1,13 @@
+birder>=0.5.2
+
+ftfy>=6.3.1
+regex>=2025.7.29
+tqdm>=4.67.0
+webdataset>=0.2.111
+
+huggingface_hub
+transformers
+
+# PyTorch, you should install a version suitable for your hardware and drivers
+torch>=2.10.0
+torchvision

@@ -1,0 +1,21 @@
+# This CITATION.cff file was generated with cffinit.
+
+cff-version: 1.2.0
+title: Birder CLIP
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Ofer
+    family-names: Hasson
+repository-code: "https://gitlab.com/birder/birder-clip"
+repository-artifact: "https://pypi.org/project/birder-clip/"
+abstract: >-
+  A Birder extension for CLIP-style image-text modeling and
+  multimodal computer vision workflows.
+keywords:
+  - computer-vision
+  - clip
+  - image-text
+license: Apache-2.0

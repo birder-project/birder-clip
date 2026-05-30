@@ -1,0 +1,71 @@
+[project]
+name = "birder_clip"
+authors = [{ name = "Ofer Hasson" }]
+description = "A Birder extension for CLIP-style image-text modeling and multimodal computer vision workflows."
+readme = "README.md"
+requires-python = ">=3.11"
+keywords = [
+    "computer-vision",
+    "clip",
+    "image-text",
+    "pytorch",
+    "deep-learning",
+    "artificial intelligence",
+]
+license = "Apache-2.0"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dynamic = ["dependencies", "optional-dependencies", "version"]
+
+[project.urls]
+Homepage = "https://gitlab.com/birder/birder-clip"
+Issues = "https://gitlab.com/birder/birder-clip/-/issues"
+Changelog = "https://gitlab.com/birder/birder-clip/-/blob/main/CHANGELOG.md"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["birder_clip*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+birder_clip = ["tokenizers/bpe_simple_vocab_16e6.txt.gz"]
+
+[tool.setuptools.dynamic]
+version = { attr = "birder_clip.version.__version__" }
+dependencies = { file = ["requirements/requirements.txt"] }
+optional-dependencies.dev = { file = ["requirements/_requirements-dev.txt"] }
+
+[tool.black]
+line-length = 120
+target-version = ["py311"]
+exclude = '/(\.git|\.mypy_cache|\.venv|node_modules)/'
+extend-exclude = '^/data/'
+
+[tool.isort]
+line_length = 120
+force_single_line = true
+skip = ["data/", ".venv/"]
+
+[tool.coverage.run]
+omit = [
+    # Omit command line scripts and tools
+    "birder_clip/scripts/*",
+    "birder_clip/tools/*",
+]
