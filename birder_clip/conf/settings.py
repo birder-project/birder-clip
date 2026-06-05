@@ -2,6 +2,11 @@ import logging.config
 import os
 from typing import Any
 
+from birder.conf import settings as birder_settings
+
+# Paths
+TOKENIZERS_DIR = birder_settings.MODELS_DIR.joinpath("tokenizers")
+
 # Logging
 # https://docs.python.org/3/library/logging.config.html
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()

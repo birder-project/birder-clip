@@ -9,6 +9,7 @@ class embedding again.
 """
 
 from collections.abc import Sequence
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -22,7 +23,7 @@ def render_prompts(class_names: Sequence[str], templates: Sequence[str]) -> list
 
 
 def build_class_text_embeddings(
-    model: BaseNet,
+    net: BaseNet,
     tokenizer: Tokenizer,
     class_names: Sequence[str],
     templates: Sequence[str],
@@ -30,6 +31,8 @@ def build_class_text_embeddings(
     device: torch.device,
     context_length: int | None = None,
     batch_size: int | None = None,
+    amp: bool = False,
+    amp_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:
     num_templates = len(templates)
     if batch_size is None:
@@ -41,7 +44,8 @@ def build_class_text_embeddings(
             batch_class_names = class_names[start : start + batch_size]
             prompts = render_prompts(batch_class_names, templates)
             tokens = tokenizer(prompts, context_length=context_length).to(device)
-            class_embeddings = model.encode_text(tokens, normalize=True)
+            with torch.amp.autocast(device.type, enabled=amp, dtype=amp_dtype):
+                class_embeddings = net.encode_text(tokens, normalize=True)
 
             class_embeddings = class_embeddings.reshape(len(batch_class_names), num_templates, -1).mean(dim=1)
             class_embeddings = F.normalize(class_embeddings, dim=-1)
