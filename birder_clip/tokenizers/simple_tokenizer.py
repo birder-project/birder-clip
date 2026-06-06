@@ -8,17 +8,16 @@ https://github.com/mlfoundations/open_clip/blob/main/src/open_clip/tokenizer.py
 # Reference license: MIT (both)
 
 import gzip
-import html
-import string
-from collections.abc import Callable
 from collections.abc import Iterable
 from importlib import resources
 from pathlib import Path
 from typing import Optional
 
-import ftfy
 import regex as re
 import torch
+
+from birder_clip.tokenizers.base import get_clean_fn
+from birder_clip.tokenizers.registry import register_tokenizer
 
 DEFAULT_CONTEXT_LENGTH = 77
 
@@ -57,46 +56,6 @@ def get_pairs(word: tuple[str, ...]) -> set[tuple[str, str]]:
         previous = current
 
     return pairs
-
-
-def basic_clean(text: str) -> str:
-    text = ftfy.fix_text(text)
-    text = html.unescape(html.unescape(text))
-    return text.strip()
-
-
-def whitespace_clean(text: str) -> str:
-    return " ".join(text.split()).strip()
-
-
-def canonicalize_text(text: str) -> str:
-    text = text.replace("_", " ")
-    text = text.translate(str.maketrans("", "", string.punctuation))
-    text = text.lower()
-    return whitespace_clean(text)
-
-
-def _clean_lower(text: str) -> str:
-    return whitespace_clean(basic_clean(text)).lower()
-
-
-def _clean_whitespace(text: str) -> str:
-    return whitespace_clean(basic_clean(text))
-
-
-def _clean_canonicalize(text: str) -> str:
-    return canonicalize_text(basic_clean(text))
-
-
-def get_clean_fn(clean: str) -> Callable[[str], str]:
-    if clean == "lower":
-        return _clean_lower
-    if clean == "whitespace":
-        return _clean_whitespace
-    if clean == "canonicalize":
-        return _clean_canonicalize
-
-    raise ValueError(f"Unknown clean function: {clean}")
 
 
 class SimpleTokenizer:
@@ -223,3 +182,8 @@ class SimpleTokenizer:
             result[index, : len(tokens)] = torch.tensor(tokens)
 
         return result
+
+
+register_tokenizer("simple_tokenizer", SimpleTokenizer, context_length=DEFAULT_CONTEXT_LENGTH)
+register_tokenizer("openai_clip_bpe", SimpleTokenizer, context_length=77)
+register_tokenizer("pe_base_bpe", SimpleTokenizer, context_length=32)

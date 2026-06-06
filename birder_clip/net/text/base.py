@@ -9,9 +9,10 @@ from birder_clip.model_registry import Task
 
 
 class TextBaseNet(nn.Module):
+    default_context_length = 77
     task = str(Task.TEXT)
 
-    def __init__(self, *, config: Optional[dict[str, Any]] = None) -> None:
+    def __init__(self, *, config: Optional[dict[str, Any]] = None, context_length: Optional[int] = None) -> None:
         super().__init__()
         if hasattr(self, "config") is False:
             self.config = config
@@ -23,7 +24,18 @@ class TextBaseNet(nn.Module):
             assert self.config is not None
             self.config.update(config)  # Override with custom config
 
+        if context_length is not None:
+            self.context_length = context_length
+        else:
+            self.context_length = self.default_context_length
+
         self.embedding_size: int
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
+
+    def adjust_context_length(self, new_context_length: int) -> None:
+        if new_context_length == self.context_length:
+            return
+
+        self.context_length = new_context_length

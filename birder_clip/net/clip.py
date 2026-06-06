@@ -4,6 +4,7 @@ from typing import Optional
 
 import torch
 import torch.nn.functional as F
+from birder.conf import settings
 from birder.model_registry import registry as birder_registry
 from birder.net.base import BaseNet as ImageEncoder
 from torch import nn
@@ -18,21 +19,22 @@ class CLIP(BaseNet):
         super().__init__(config=config)
         assert self.config is not None, "must set config"
 
-        embed_dim: int = self.config["embed_dim"]
         image_config: dict[str, Any] = self.config["image"]
         text_config: dict[str, Any] = self.config["text"]
+        embed_dim: int = self.config["embed_dim"]
         tokenizer_name: str = self.config["tokenizer"]
 
-        image_encoder_size: Optional[tuple[int, int]] = image_config.get("size", None)
         image_encoder: ImageEncoder = birder_registry.net_factory(
             image_config["network"],
             image_config.get("num_classes", embed_dim),
+            image_config.get("input_channels", settings.DEFAULT_NUM_CHANNELS),
             config=image_config.get("config", None),
-            size=image_encoder_size,
+            size=image_config.get("size", None),
         )
         text_encoder = registry.text_factory(
             text_config["network"],
             config=text_config.get("config", None),
+            context_length=text_config.get("context_length", None),
         )
         assert isinstance(text_encoder, TextBaseNet)
         assert text_encoder.embedding_size == embed_dim
@@ -69,9 +71,18 @@ class CLIP(BaseNet):
 
         return logits
 
-    def forward(self, image: torch.Tensor, text: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, image: torch.Tensor, text: torch.Tensor, *, return_features: bool = False
+    ) -> torch.Tensor | dict[str, Optional[torch.Tensor]]:
         image_features = self.encode_image(image, normalize=True)
         text_features = self.encode_text(text, normalize=True)
+        if return_features is True:
+            return {
+                "image_features": image_features,
+                "text_features": text_features,
+                "logit_scale": self.logit_scale.exp(),
+                "logit_bias": self.logit_bias,
+            }
 
         return self.forward_logits(image_features, text_features)
 
@@ -83,7 +94,6 @@ registry.register_model_config(
     "openai_clip_vit_l14",
     CLIP,
     config={
-        "embed_dim": 768,
         "image": {
             "network": "vit_l14_pn_quick_gelu",
             "size": (224, 224),
@@ -97,6 +107,7 @@ registry.register_model_config(
                 "act_layer_type": "quick_gelu",
             },
         },
+        "embed_dim": 768,
         "tokenizer": "openai_clip_bpe",
     },
 )
@@ -106,17 +117,15 @@ registry.register_model_config(
     "pe_core_s16",
     CLIP,
     config={
-        "embed_dim": 512,
         "image": {
             "network": "rope_i_vit_s16_pn_aps_c1",
             "size": (384, 384),
         },
         "text": {
             "network": "text_transformer",
-            "config": {
-                "context_length": 32,
-            },
+            "context_length": 32,
         },
+        "embed_dim": 512,
         "tokenizer": "pe_base_bpe",
     },
 )
@@ -124,7 +133,6 @@ registry.register_model_config(
     "pe_core_b16",
     CLIP,
     config={
-        "embed_dim": 1024,
         "image": {
             "network": "rope_i_vit_b16_pn_aps_c1",
             "size": (224, 224),
@@ -132,13 +140,14 @@ registry.register_model_config(
         "text": {
             "network": "text_transformer",
             "config": {
-                "context_length": 32,
                 "hidden_dim": 1024,
                 "num_heads": 16,
                 "num_layers": 24,
                 "output_dim": 1024,
             },
+            "context_length": 32,
         },
+        "embed_dim": 1024,
         "tokenizer": "pe_base_bpe",
     },
 )
@@ -146,7 +155,6 @@ registry.register_model_config(
     "pe_core_l14",
     CLIP,
     config={
-        "embed_dim": 1024,
         "image": {
             "network": "rope_i_vit_l14_pn_aps_c1",
             "size": (336, 336),
@@ -154,13 +162,14 @@ registry.register_model_config(
         "text": {
             "network": "text_transformer",
             "config": {
-                "context_length": 32,
                 "hidden_dim": 1024,
                 "num_heads": 16,
                 "num_layers": 24,
                 "output_dim": 1024,
             },
+            "context_length": 32,
         },
+        "embed_dim": 1024,
         "tokenizer": "pe_base_bpe",
     },
 )
@@ -170,8 +179,6 @@ registry.register_model_config(
     "siglip_v2_vit_so400m_p14",
     CLIP,
     config={
-        "embed_dim": 1152,
-        "init_logit_bias": -10.0,
         "image": {
             "network": "vit_so400m_p14_ap",
             "num_classes": 0,
@@ -180,7 +187,6 @@ registry.register_model_config(
         "text": {
             "network": "text_transformer",
             "config": {
-                "context_length": 64,
                 "vocab_size": 256000,
                 "hidden_dim": 1152,
                 "num_heads": 16,
@@ -193,8 +199,11 @@ registry.register_model_config(
                 "norm_layer_eps": 1e-6,
                 "act_layer_type": "gelu_tanh",
             },
+            "context_length": 64,
         },
+        "embed_dim": 1152,
         "tokenizer": "siglip2_gemma",
+        "init_logit_bias": -10.0,
     },
 )
 
@@ -203,7 +212,6 @@ registry.register_model_config(
     "bioclip_v1_vit_b16",
     CLIP,
     config={
-        "embed_dim": 512,
         "image": {
             "network": "vit_b16_pn",
             "size": (224, 224),
@@ -211,6 +219,7 @@ registry.register_model_config(
         "text": {
             "network": "text_transformer",
         },
+        "embed_dim": 512,
         "tokenizer": "openai_clip_bpe",
     },
 )
@@ -220,7 +229,6 @@ registry.register_model_config(
     "bioclip_v2_vit_l14",
     CLIP,
     config={
-        "embed_dim": 768,
         "image": {
             "network": "vit_l14_pn",
             "size": (224, 224),
@@ -233,6 +241,23 @@ registry.register_model_config(
                 "output_dim": 768,
             },
         },
+        "embed_dim": 768,
         "tokenizer": "openai_clip_bpe",
+    },
+)
+
+registry.register_weights(
+    "openai_clip_vit_l14",
+    {
+        "description": "ViT l14 image-text model pretrained by OpenAI using CLIP",
+        "resolution": (224, 224),
+        "context_length": 77,
+        "formats": {
+            "pt": {
+                "file_size": 1468.1,
+                "sha256": "1020f6b1b35a551c22993788d38e0dd4933af3616b120d7375364cde9786fcb6",
+            }
+        },
+        "net": {"network": "openai_clip_vit_l14"},
     },
 )

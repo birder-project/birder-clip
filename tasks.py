@@ -2,8 +2,14 @@
 import pathlib
 import time
 
+import torch
+from birder.common import cli
 from invoke import Exit
 from invoke import task
+
+from birder_clip.common import fs_ops
+from birder_clip.common import lib
+from birder_clip.model_registry import registry
 
 if pathlib.Path(__file__).parent != pathlib.Path().resolve():
     print("Can only run from the root directory, aborting...")
@@ -174,3 +180,64 @@ def pytest(ctx, coverage=False, failfast=False):
         echo("Passed", color=COLOR_GREEN)
 
     return return_code
+
+
+#################
+# Model registry
+#################
+
+
+@task
+def model_pre_publish(
+    _ctx, model, tag=None, image_encoder=None, text_encoder=None, embed_dim=None, tokenizer=None, epoch=None
+):
+    """
+    Generate data required for publishing a model
+    """
+
+    if embed_dim is not None:
+        embed_dim = int(embed_dim)
+    if epoch is not None:
+        epoch = int(epoch)
+
+    network_name = lib.get_image_text_network_name(
+        model,
+        tag=tag,
+        image_encoder=image_encoder,
+        text_encoder=text_encoder,
+        embed_dim=embed_dim,
+        tokenizer=tokenizer,
+    )
+    net, model_info = fs_ops.load_model(
+        torch.device("cpu"),
+        model,
+        tag=tag,
+        image_encoder=image_encoder,
+        text_encoder=text_encoder,
+        embed_dim=embed_dim,
+        tokenizer=tokenizer,
+        epoch=epoch,
+        inference=True,
+    )
+
+    num_params = sum(p.numel() for p in net.parameters())
+    num_params = round(num_params / 1_000_000, 1)
+    size = lib.get_size_from_signature(model_info.signature)
+    context_length = net.text_encoder.context_length
+
+    # Check if model already in manifest
+    if registry.pretrained_exists(network_name) is True:
+        echo("NOTICE: Model already in manifest")
+    else:
+        echo("Model not in manifest, generating ModelMetadata information")
+
+    path = fs_ops.model_path(network_name, epoch=epoch)
+    file_size = pathlib.Path(path).stat().st_size
+    file_size = round(file_size / 1024 / 1024, 1)
+    sha256 = cli.calc_sha256(path)
+
+    print(f'"resolution": {size},')
+    print(f'"context_length": {context_length},')
+    print(f'"file_size": {file_size},')
+    print(f'"params": {num_params},')
+    print(f'"sha256": "{sha256}",')

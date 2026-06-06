@@ -34,7 +34,6 @@ class TestModelRegistry(unittest.TestCase):
     @staticmethod
     def _small_text_config(**kwargs: Any) -> dict[str, Any]:
         config: dict[str, Any] = {
-            "context_length": 8,
             "vocab_size": 10,
             "hidden_dim": 16,
             "num_heads": 4,

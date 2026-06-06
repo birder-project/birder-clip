@@ -29,8 +29,8 @@ def build_class_text_embeddings(
     templates: Sequence[str],
     *,
     device: torch.device,
-    context_length: int | None = None,
-    batch_size: int | None = None,
+    context_length: Optional[int] = None,
+    batch_size: Optional[int] = None,
     amp: bool = False,
     amp_dtype: Optional[torch.dtype] = None,
 ) -> torch.Tensor:

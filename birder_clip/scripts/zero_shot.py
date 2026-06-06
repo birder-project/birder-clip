@@ -25,7 +25,6 @@ from torch.utils.data import DataLoader
 
 from birder_clip.common import fs_ops
 from birder_clip.common import lib
-from birder_clip.conf import settings  # pylint: disable=unused-import  # noqa: F401
 from birder_clip.inference.zero_shot import build_class_text_embeddings
 from birder_clip.inference.zero_shot_templates import TEMPLATE_SETS
 from birder_clip.model_registry import Task
@@ -202,7 +201,8 @@ def predict(args: argparse.Namespace) -> None:
     else:
         tokenizer_name = net.tokenizer_name
 
-    tokenizer = get_tokenizer(tokenizer_name)
+    context_length = lib.get_context_length_from_signature(model_info.signature)
+    tokenizer = get_tokenizer(tokenizer_name, context_length=context_length)
 
     logger.debug(f"Model loaded with signature: {model_info.signature}")
     logger.debug(f"RGB stats: {model_info.rgb_stats}")
@@ -458,6 +458,17 @@ def validate_args(args: argparse.Namespace) -> None:
         raise cli.ValidationError("--network is required")
     if registry.exists(args.network, task=Task.IMAGE_TEXT) is False:
         raise cli.ValidationError(f"--network {args.network} not supported, see list-models tool for available options")
+
+    reserved_model_config_keys = lib.get_reserved_model_config_keys(args.model_config)
+    if len(reserved_model_config_keys) > 0:
+        raise cli.ValidationError(
+            "--model-config cannot contain keys with dedicated CLI flags: " f"{', '.join(reserved_model_config_keys)}"
+        )
+    if args.image_encoder_config is not None and "size" in args.image_encoder_config:
+        raise cli.ValidationError("--image-encoder-config cannot contain size, use --size")
+    if args.text_encoder_config is not None and "context_length" in args.text_encoder_config:
+        raise cli.ValidationError("--text-encoder-config cannot contain context_length")
+
     if args.compile_mode is not None and args.compile is False:
         raise cli.ValidationError("--compile-mode requires --compile")
     if args.class_file is None and args.classes is None:

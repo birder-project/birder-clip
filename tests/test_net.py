@@ -30,7 +30,6 @@ class TestTextNetworks(unittest.TestCase):
     @staticmethod
     def _small_text_config(**kwargs: Any) -> dict[str, Any]:
         config: dict[str, Any] = {
-            "context_length": 8,
             "vocab_size": 10,
             "hidden_dim": 16,
             "num_heads": 4,
@@ -58,6 +57,7 @@ class TestTextNetworks(unittest.TestCase):
         net = registry.text_factory(
             "text_transformer",
             config=self._small_text_config(causal_mask=False, pad_token_id=0),
+            context_length=8,
         )
         tokens = torch.tensor([[1, 2, 9, 0, 0], [3, 4, 5, 9, 0]])
         attn_mask = net._pad_attention_mask(tokens)
@@ -75,6 +75,7 @@ class TestTextNetworks(unittest.TestCase):
                 net = registry.text_factory(
                     "text_transformer",
                     config=self._small_text_config(pool_type=pool_type),
+                    context_length=8,
                 )
                 out = net(tokens)
 
@@ -86,8 +87,6 @@ class TestCLIPNetworks(unittest.TestCase):
     @staticmethod
     def _small_clip_config() -> dict[str, Any]:
         return {
-            "embed_dim": 12,
-            "tokenizer": "openai_clip_bpe",
             "image": {
                 "network": "vit_s16",
                 "size": (64, 64),
@@ -95,7 +94,10 @@ class TestCLIPNetworks(unittest.TestCase):
             "text": {
                 "network": "text_transformer",
                 "config": TestTextNetworks._small_text_config(),
+                "context_length": 8,
             },
+            "embed_dim": 12,
+            "tokenizer": "openai_clip_bpe",
         }
 
     def test_clip_model_forward(self) -> None:
@@ -114,4 +116,32 @@ class TestCLIPNetworks(unittest.TestCase):
         logits = net(image, text)
 
         self.assertSequenceEqual(logits.shape, (1, 3))
+        self.assertTrue(torch.isfinite(logits).all())
+
+    def test_clip_model_forward_features(self) -> None:
+        net = registry.net_factory("clip", config=self._small_clip_config())
+
+        image = torch.rand(2, 3, 64, 64)
+        text = torch.tensor([[1, 2, 9, 0, 0], [3, 4, 5, 9, 0]])
+        out = net(image, text, return_features=True)
+
+        self.assertSetEqual(set(out.keys()), {"image_features", "text_features", "logit_scale", "logit_bias"})
+        self.assertSequenceEqual(out["image_features"].shape, (2, 12))
+        self.assertSequenceEqual(out["text_features"].shape, (2, 12))
+        self.assertEqual(out["logit_scale"].ndim, 0)
+        self.assertIsNone(out["logit_bias"])
+        self.assertTrue(torch.isfinite(out["image_features"]).all())
+        self.assertTrue(torch.isfinite(out["text_features"]).all())
+
+    def test_clip_model_input_channels(self) -> None:
+        config = self._small_clip_config()
+        config["image"]["input_channels"] = 1
+        net = registry.net_factory("clip", config=config)
+
+        image = torch.rand(2, 1, 64, 64)
+        text = torch.tensor([[1, 2, 9, 0, 0], [3, 4, 5, 9, 0]])
+        logits = net(image, text)
+
+        self.assertEqual(net.image_encoder.input_channels, 1)
+        self.assertSequenceEqual(logits.shape, (2, 2))
         self.assertTrue(torch.isfinite(logits).all())

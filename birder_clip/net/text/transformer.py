@@ -204,11 +204,10 @@ class Encoder(nn.Module):
 
 
 class TextTransformer(TextBaseNet):
-    def __init__(self, *, config: Optional[dict[str, Any]] = None) -> None:
-        super().__init__(config=config)
+    def __init__(self, *, config: Optional[dict[str, Any]] = None, context_length: Optional[int] = None) -> None:
+        super().__init__(config=config, context_length=context_length)
         assert self.config is not None, "must set config"
 
-        context_length: int = self.config.get("context_length", 77)
         vocab_size: int = self.config.get("vocab_size", 49408)
         hidden_dim: int = self.config.get("hidden_dim", 512)
         num_heads: int = self.config.get("num_heads", 8)
@@ -253,7 +252,7 @@ class TextTransformer(TextBaseNet):
         self.pad_token_id = pad_token_id
         self.eos_token_id = eos_token_id
         self.token_embedding = nn.Embedding(vocab_size, hidden_dim)
-        self.pos_embedding = nn.Parameter(torch.empty(1, context_length, hidden_dim).normal_(std=0.01))
+        self.pos_embedding = nn.Parameter(torch.empty(1, self.context_length, hidden_dim).normal_(std=0.01))
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, num_layers)]
         self.encoder = Encoder(
@@ -320,6 +319,22 @@ class TextTransformer(TextBaseNet):
         out = text_global_pool(tokens, x, pool_type=self.pool_type, eos_token_id=self.eos_token_id)
 
         return self.text_projection(out)
+
+    def adjust_context_length(self, new_context_length: int) -> None:
+        if new_context_length == self.context_length:
+            return
+
+        super().adjust_context_length(new_context_length)
+
+        with torch.no_grad():
+            orig_dtype = self.pos_embedding.dtype
+            pos_embedding = self.pos_embedding.float()
+            pos_embedding = pos_embedding.permute(0, 2, 1)
+            pos_embedding = F.interpolate(pos_embedding, size=new_context_length, mode="linear", align_corners=True)
+            pos_embedding = pos_embedding.permute(0, 2, 1)
+            pos_embedding = pos_embedding.to(orig_dtype)
+
+        self.pos_embedding = nn.Parameter(pos_embedding)
 
 
 registry.register_model_config("text_transformer", TextTransformer, config={})
