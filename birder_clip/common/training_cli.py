@@ -49,9 +49,7 @@ def add_loss_args(parser: argparse.ArgumentParser) -> None:
 def add_optimization_args(parser: argparse.ArgumentParser, default_batch_size: int = 32) -> None:
     group = parser.add_argument_group("Optimization parameters")
     group.add_argument("--batch-size", type=int, default=default_batch_size, metavar="N", help="the batch size")
-    group.add_argument(
-        "--opt", type=str, choices=list(get_args(OptimizerType)), default="sgd", help="optimizer to use"
-    )
+    group.add_argument("--opt", type=str, choices=list(get_args(OptimizerType)), default="sgd", help="optimizer to use")
     group.add_argument("--opt-fused", default=False, action="store_true", help="use fused optimizer implementation")
     group.add_argument("--momentum", type=float, default=0.9, metavar="M", help="optimizer momentum")
     group.add_argument("--nesterov", default=False, action="store_true", help="use nesterov momentum")
