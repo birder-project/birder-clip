@@ -43,9 +43,17 @@ def get_image_text_network_name(
     parts = [network]
     if image_encoder is not None:
         parts.append(image_encoder)
-    if text_encoder is not None:
+    if text_encoder is not None and text_encoder != "text_transformer":
         parts.append(text_encoder)
-    if tokenizer is not None:
+
+    if registry.exists(network) is True:
+        default_tokenizer = registry.get_default_tokenizer(network)
+    else:
+        default_tokenizer = "simple_tokenizer"
+    if default_tokenizer is None:
+        default_tokenizer = "simple_tokenizer"
+
+    if tokenizer is not None and tokenizer != default_tokenizer:
         parts.append(tokenizer)
     if embed_dim is not None:
         parts.append(f"d{embed_dim}")

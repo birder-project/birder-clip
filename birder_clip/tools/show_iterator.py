@@ -8,12 +8,15 @@ from typing import get_args
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 import torchvision.transforms.v2.functional as F
 from birder.common import cli
 from birder.common import training_cli
 from birder.conf import settings
+from birder.data.dataloader.webdataset import make_wds_loader
 from birder.data.datasets.directory import ImageLoaderName
 from birder.data.datasets.directory import get_image_loader
+from birder.data.datasets.webdataset import wds_args_from_info
 from birder.data.transforms.classification import get_rgb_stats
 from birder.data.transforms.classification import inference_preset
 from birder.data.transforms.classification import reverse_preset
@@ -21,6 +24,8 @@ from birder.data.transforms.classification import training_preset
 from torch.utils.data import DataLoader
 
 from birder_clip.data.datasets.csv import ImageTextCsvDataset
+from birder_clip.data.datasets.webdataset import make_wds_dataset
+from birder_clip.data.datasets.webdataset import prepare_wds_args
 
 logger = logging.getLogger(__name__)
 
@@ -59,11 +64,25 @@ def _show_single_sample(dataset: ImageTextCsvDataset, transform: Any, reverse_tr
         plt.show()
 
 
-def _show_batches(dataset: ImageTextCsvDataset, reverse_transform: Any) -> None:
+def _show_batches(
+    dataset: ImageTextCsvDataset | torch.utils.data.IterableDataset, reverse_transform: Any, args: argparse.Namespace
+) -> None:
     cols = 4
     rows = 2
     batch_size = cols * rows
-    data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    if args.wds is True:
+        data_loader = make_wds_loader(
+            dataset,
+            batch_size,
+            num_workers=1,
+            prefetch_factor=1,
+            collate_fn=None,
+            world_size=1,
+            pin_memory=False,
+            shuffle=args.wds_extra_shuffle,
+        )
+    else:
+        data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     for batch_idx, (paths, images, captions) in enumerate(data_loader):
         if batch_idx >= 6:
@@ -105,12 +124,31 @@ def show_iterator(args: argparse.Namespace) -> None:
     else:
         raise ValueError(f"Unknown mode={args.mode}")
 
-    dataset = ImageTextCsvDataset(
-        args.data_path,
-        transforms=transform,
-        loader=get_image_loader(args.img_loader, args.channels),
-    )
-    logger.info(dataset)
+    if args.wds is True:
+        wds_path: str | list[str]
+        if args.wds_info is not None:
+            wds_path, dataset_size = wds_args_from_info(args.wds_info, args.wds_split)
+            if args.wds_size is not None:
+                dataset_size = args.wds_size
+        else:
+            wds_path, dataset_size = prepare_wds_args(args.data_path, args.wds_size, torch.device("cpu"))
+
+        dataset = make_wds_dataset(
+            wds_path,
+            dataset_size=dataset_size,
+            shuffle=True,
+            samples_names=True,
+            transform=transform,
+            image_decoder=args.img_loader,
+            channels=args.channels,
+            cache_dir=args.wds_cache_dir,
+        )
+    else:
+        dataset = ImageTextCsvDataset(
+            args.data_path,
+            transforms=transform,
+            loader=get_image_loader(args.img_loader, args.channels),
+        )
 
     if args.batch is False:
         raw_dataset = ImageTextCsvDataset(
@@ -119,7 +157,7 @@ def show_iterator(args: argparse.Namespace) -> None:
         )
         _show_single_sample(raw_dataset, transform, reverse_transform)
     else:
-        _show_batches(dataset, reverse_transform)
+        _show_batches(dataset, reverse_transform, args)
 
 
 def set_parser(subparsers: Any) -> None:
@@ -133,6 +171,9 @@ def set_parser(subparsers: Any) -> None:
             "python -m birder_clip.tools show-iterator --mode training --aug-level 1 --data-path data/training.csv\n"
             "python -m birder_clip.tools show-iterator --mode inference --size 336 --batch "
             "--data-path data/validation.csv\n"
+            "python -m birder_clip.tools show-iterator --mode training --aug-level 4 --batch --wds "
+            "--wds-info https://huggingface.co/datasets/pixparse/cc12m-wds/resolve/main/_info.json "
+            "--wds-split train\n"
         ),
         formatter_class=cli.ArgumentHelpFormatter,
     )
@@ -156,17 +197,42 @@ def set_parser(subparsers: Any) -> None:
         "--channels", type=int, default=settings.DEFAULT_NUM_CHANNELS, metavar="N", help="no. of image channels"
     )
     subparser.add_argument("--data-path", nargs="+", help="image-text CSV file paths")
+    subparser.add_argument("--wds", default=False, action="store_true", help="use webdataset")
+    subparser.add_argument(
+        "--wds-info", type=str, action="append", metavar="FILE", help="one or more wds info file paths"
+    )
+    subparser.add_argument("--wds-cache-dir", type=str, metavar="DIR", help="webdataset cache directory")
+    subparser.add_argument("--wds-size", type=int, metavar="N", help="size of the wds directory")
+    subparser.add_argument(
+        "--wds-split", type=str, default="training", metavar="NAME", help="wds dataset split to load"
+    )
+    subparser.add_argument(
+        "--wds-extra-shuffle",
+        default=False,
+        action="store_true",
+        help="enable cross-worker batch shuffling after batching",
+    )
     subparser.set_defaults(func=main)
 
 
 def main(args: argparse.Namespace) -> None:
-    if args.data_path is None:
+    if args.wds is True and args.batch is False:
+        raise cli.ValidationError("--wds requires --batch to be set")
+    if args.wds is False and args.data_path is None:
         raise cli.ValidationError("--data-path is required")
+    if args.wds is True and args.data_path is None and args.wds_info is None:
+        raise cli.ValidationError("--data-path is required")
+    if args.wds is True and args.data_path is not None and len(args.data_path) > 1:
+        raise cli.ValidationError(f"--wds can have at most 1 --data-path, got {len(args.data_path)}")
     if args.rgb_mean is not None and len(args.rgb_mean) != args.channels:
         raise cli.ValidationError(f"--rgb-mean must have {args.channels} values, got {len(args.rgb_mean)}")
     if args.rgb_std is not None and len(args.rgb_std) != args.channels:
         raise cli.ValidationError(f"--rgb-std must have {args.channels} values, got {len(args.rgb_std)}")
 
-    args.data_path = [Path(path) for path in args.data_path]
+    if args.data_path is not None:
+        if args.wds is True:
+            args.data_path = args.data_path[0]
+        else:
+            args.data_path = [Path(path) for path in args.data_path]
     args.size = cli.parse_size(args.size)
     show_iterator(args)

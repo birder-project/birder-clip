@@ -246,6 +246,10 @@ registry.register_model_config(
     },
 )
 
+
+# Weights
+####################
+
 registry.register_weights(
     "openai_clip_vit_l14",
     {
@@ -259,5 +263,20 @@ registry.register_weights(
             }
         },
         "net": {"network": "openai_clip_vit_l14"},
+    },
+)
+registry.register_weights(
+    "pe_core_b16",
+    {
+        "description": "RoPEi ViT b16 image encoder pretrained by Meta FAIR using CLIP",
+        "resolution": (224, 224),
+        "context_length": 32,
+        "formats": {
+            "pt": {
+                "file_size": 1707.8,
+                "sha256": "11453d4a36fad6dbd802ec9fa35375ce0ae8b7b156a5ca45c0e87587df05290f",
+            }
+        },
+        "net": {"network": "pe_core_b16"},
     },
 )

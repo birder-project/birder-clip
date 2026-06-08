@@ -1,6 +1,9 @@
 """
 CLIP loss, adapted from
 https://github.com/mlfoundations/open_clip/blob/main/src/open_clip/loss.py
+
+Paper "Learning Transferable Visual Models From Natural Language Supervision",
+https://arxiv.org/abs/2103.00020
 """
 
 # Reference license: MIT
@@ -22,6 +25,14 @@ def gather_features(features: torch.Tensor) -> torch.Tensor:
 
 
 class CLIPLoss(torch.nn.Module):
+    """
+    CLIP symmetric contrastive loss
+
+    Implements the bidirectional InfoNCE objective from CLIP: image features
+    classify their matching text features, and text features classify their
+    matching image features, using the batch as negatives.
+    """
+
     def forward(
         self,
         image_features: torch.Tensor,

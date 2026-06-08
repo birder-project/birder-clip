@@ -17,32 +17,6 @@ from birder_clip.model_registry import Task
 from birder_clip.model_registry import registry
 
 
-def add_compile_args(parser: argparse.ArgumentParser) -> None:
-    group = parser.add_argument_group("Compilation parameters")
-    group.add_argument("--compile", default=False, action="store_true", help="enable compilation")
-    group.add_argument("--compile-fullgraph", default=False, action="store_true", help="compile using fullgraph=True")
-    group.add_argument(
-        "--compile-mode", type=str, choices=list(torch._inductor.list_mode_options().keys()), help="torch.compile mode"
-    )
-    group.add_argument(
-        "--compile-opt", default=False, action="store_true", help="enable compilation for optimizer step"
-    )
-    group.add_argument(
-        "--compile-recompile-limit",
-        type=int,
-        default=torch.compiler.config.recompile_limit,
-        metavar="N",
-        help="maximum recompilations per compiled function before eager fallback",
-    )
-    group.add_argument(
-        "--compile-accumulated-recompile-limit",
-        type=int,
-        default=torch.compiler.config.accumulated_recompile_limit,
-        metavar="N",
-        help="maximum total recompilations across compiled functions",
-    )
-
-
 def add_model_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-n", "--network", type=str, help="the image-text network to train")
     parser.add_argument("-t", "--tag", type=str, help="add model tag")
@@ -76,7 +50,7 @@ def add_optimization_args(parser: argparse.ArgumentParser, default_batch_size: i
     group = parser.add_argument_group("Optimization parameters")
     group.add_argument("--batch-size", type=int, default=default_batch_size, metavar="N", help="the batch size")
     group.add_argument(
-        "--opt", type=str, choices=list(get_args(OptimizerType)), default="adamw", help="optimizer to use"
+        "--opt", type=str, choices=list(get_args(OptimizerType)), default="sgd", help="optimizer to use"
     )
     group.add_argument("--opt-fused", default=False, action="store_true", help="use fused optimizer implementation")
     group.add_argument("--momentum", type=float, default=0.9, metavar="M", help="optimizer momentum")
@@ -92,6 +66,7 @@ def add_optimization_args(parser: argparse.ArgumentParser, default_batch_size: i
         metavar="N",
         help="number of iterations to accumulate gradients per optimizer step",
     )
+    # NOTE: Add flag for negative sample caching in grad accum mode
 
 
 def add_lr_wd_args(parser: argparse.ArgumentParser) -> None:
@@ -129,14 +104,14 @@ def add_lr_scheduler_args(parser: argparse.ArgumentParser) -> None:
         "--lr-scheduler-update",
         type=str,
         choices=["epoch", "step"],
-        default="step",
+        default="epoch",
         help="when to apply learning rate scheduler update: epoch (once per epoch), step (each optimizer step)",
     )
     group.add_argument(
         "--lr-scheduler",
         type=str,
         choices=list(get_args(SchedulerType)),
-        default="cosine",
+        default="constant",
         help="learning rate scheduler",
     )
     group.add_argument(
@@ -175,15 +150,6 @@ def add_lr_scheduler_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def add_input_args(parser: argparse.ArgumentParser) -> None:
-    group = parser.add_argument_group("Input parameters")
-    group.add_argument(
-        "--channels", type=int, default=settings.DEFAULT_NUM_CHANNELS, metavar="N", help="no. of image channels"
-    )
-    group.add_argument("--size", type=int, nargs="+", metavar=("H", "W"), help="image size")
-    group.add_argument("--context-length", type=int, metavar="N", help="text context length")
-
-
 def add_training_schedule_args(parser: argparse.ArgumentParser, default_epochs: int = 100) -> None:
     group = parser.add_argument_group("Training schedule parameters")
     group.add_argument("--epochs", type=int, default=default_epochs, metavar="N", help="number of training epochs")
@@ -204,6 +170,37 @@ def add_training_schedule_args(parser: argparse.ArgumentParser, default_epochs: 
     )
 
 
+def add_ema_args(
+    parser: argparse.ArgumentParser, default_ema_steps: int = 1, default_ema_decay: float = 0.9999
+) -> None:
+    group = parser.add_argument_group("Exponential moving average parameters")
+    group.add_argument(
+        "--model-ema",
+        default=False,
+        action="store_true",
+        help="enable tracking exponential moving average of model parameters",
+    )
+    group.add_argument(
+        "--model-ema-steps",
+        type=int,
+        default=default_ema_steps,
+        metavar="N",
+        help="number of optimizer steps between EMA updates",
+    )
+    group.add_argument(
+        "--model-ema-decay",
+        type=float,
+        default=default_ema_decay,
+        help="decay factor for exponential moving average of model parameters",
+    )
+    group.add_argument(
+        "--model-ema-warmup",
+        type=int,
+        metavar="N",
+        help="number of epochs/steps before EMA is applied (defaults to warmup epochs/steps, pass 0 to disable warmup)",
+    )
+
+
 def add_batch_norm_args(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("Batch normalization parameters")
     group.add_argument(
@@ -213,6 +210,15 @@ def add_batch_norm_args(parser: argparse.ArgumentParser) -> None:
         help="freeze all batch statistics and affine parameters of batchnorm2d layers",
     )
     group.add_argument("--sync-bn", default=False, action="store_true", help="use synchronized BatchNorm")
+
+
+def add_input_args(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("Input parameters")
+    group.add_argument(
+        "--channels", type=int, default=settings.DEFAULT_NUM_CHANNELS, metavar="N", help="no. of image channels"
+    )
+    group.add_argument("--size", type=int, nargs="+", metavar=("H", "W"), help="image size")
+    group.add_argument("--context-length", type=int, metavar="N", help="text context length")
 
 
 def add_data_aug_args(
@@ -260,7 +266,7 @@ def add_data_aug_args(
         "--rgb-mode",
         type=str,
         choices=list(typing.get_args(RGBMode)),
-        default="clip",
+        default="birder",
         help="RGB mean and std to use for normalization",
     )
     group.add_argument(
@@ -276,67 +282,6 @@ def add_data_aug_args(
         nargs="+",
         metavar=("R", "G"),
         help="set custom RGB std values (overrides values from selected RGB mode)",
-    )
-
-
-def add_checkpoint_args(parser: argparse.ArgumentParser, default_save_frequency: int = 1) -> None:
-    group = parser.add_argument_group("Checkpoint parameters")
-    group.add_argument(
-        "--save-frequency", type=int, default=default_save_frequency, metavar="N", help="frequency of model saving"
-    )
-    group.add_argument(
-        "--keep-last", type=int, metavar="N", help="number of recent checkpoints to keep (older ones are deleted)"
-    )
-    group.add_argument(
-        "--pretrained",
-        default=False,
-        action="store_true",
-        help="start with pretrained version of specified network (will download if not found locally)",
-    )
-    group.add_argument("--resume-epoch", type=int, metavar="N", help="epoch number to resume training from")
-    group.add_argument(
-        "--non-strict-weights",
-        default=False,
-        action="store_true",
-        help="allow non-strict loading of model weights (missing or unexpected keys in state_dict)",
-    )
-    group.add_argument(
-        "--load-states",
-        default=False,
-        action="store_true",
-        help="load optimizer, scheduler and scaler states when resuming",
-    )
-    group.add_argument("--load-scheduler", default=False, action="store_true", help="load only scheduler when resuming")
-
-
-def add_ema_args(
-    parser: argparse.ArgumentParser, default_ema_steps: int = 1, default_ema_decay: float = 0.9999
-) -> None:
-    group = parser.add_argument_group("Exponential moving average parameters")
-    group.add_argument(
-        "--model-ema",
-        default=False,
-        action="store_true",
-        help="enable tracking exponential moving average of model parameters",
-    )
-    group.add_argument(
-        "--model-ema-steps",
-        type=int,
-        default=default_ema_steps,
-        metavar="N",
-        help="number of optimizer steps between EMA updates",
-    )
-    group.add_argument(
-        "--model-ema-decay",
-        type=float,
-        default=default_ema_decay,
-        help="decay factor for exponential moving average of model parameters",
-    )
-    group.add_argument(
-        "--model-ema-warmup",
-        type=int,
-        metavar="N",
-        help="number of epochs/steps before EMA is applied (defaults to warmup epochs/steps, pass 0 to disable warmup)",
     )
 
 
@@ -403,6 +348,62 @@ def add_precision_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--fast-matmul", default=False, action="store_true", help="use fast matrix multiplication (affects precision)"
     )
+
+
+def add_compile_args(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("Compilation parameters")
+    group.add_argument("--compile", default=False, action="store_true", help="enable compilation")
+    group.add_argument("--compile-fullgraph", default=False, action="store_true", help="compile using fullgraph=True")
+    group.add_argument(
+        "--compile-mode", type=str, choices=list(torch._inductor.list_mode_options().keys()), help="torch.compile mode"
+    )
+    group.add_argument(
+        "--compile-opt", default=False, action="store_true", help="enable compilation for optimizer step"
+    )
+    group.add_argument(
+        "--compile-recompile-limit",
+        type=int,
+        default=torch.compiler.config.recompile_limit,
+        metavar="N",
+        help="maximum recompilations per compiled function before eager fallback",
+    )
+    group.add_argument(
+        "--compile-accumulated-recompile-limit",
+        type=int,
+        default=torch.compiler.config.accumulated_recompile_limit,
+        metavar="N",
+        help="maximum total recompilations across compiled functions",
+    )
+
+
+def add_checkpoint_args(parser: argparse.ArgumentParser, default_save_frequency: int = 1) -> None:
+    group = parser.add_argument_group("Checkpoint parameters")
+    group.add_argument(
+        "--save-frequency", type=int, default=default_save_frequency, metavar="N", help="frequency of model saving"
+    )
+    group.add_argument(
+        "--keep-last", type=int, metavar="N", help="number of recent checkpoints to keep (older ones are deleted)"
+    )
+    group.add_argument(
+        "--pretrained",
+        default=False,
+        action="store_true",
+        help="start with pretrained version of specified network (will download if not found locally)",
+    )
+    group.add_argument("--resume-epoch", type=int, metavar="N", help="epoch number to resume training from")
+    group.add_argument(
+        "--non-strict-weights",
+        default=False,
+        action="store_true",
+        help="allow non-strict loading of model weights (missing or unexpected keys in state_dict)",
+    )
+    group.add_argument(
+        "--load-states",
+        default=False,
+        action="store_true",
+        help="load optimizer, scheduler and scaler states when resuming",
+    )
+    group.add_argument("--load-scheduler", default=False, action="store_true", help="load only scheduler when resuming")
 
 
 def add_distributed_args(parser: argparse.ArgumentParser) -> None:
@@ -558,5 +559,7 @@ def common_args_validation(args: argparse.Namespace) -> None:
         raise cli.ValidationError("--embed-dim must be positive")
     if args.context_length is not None and args.context_length <= 0:
         raise cli.ValidationError("--context-length must be positive")
+    if args.grad_accum_steps < 1:
+        raise cli.ValidationError("--grad-accum-steps must be >= 1")
     if args.model_ema_steps < 1:
         raise cli.ValidationError("--model-ema-steps must be >= 1")

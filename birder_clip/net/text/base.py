@@ -1,4 +1,5 @@
 import copy
+import logging
 from typing import Any
 from typing import Optional
 
@@ -6,6 +7,8 @@ import torch
 from torch import nn
 
 from birder_clip.model_registry import Task
+
+logger = logging.getLogger(__name__)
 
 
 class TextBaseNet(nn.Module):
@@ -38,4 +41,5 @@ class TextBaseNet(nn.Module):
         if new_context_length == self.context_length:
             return
 
+        logger.info(f"Adjusting model context length from {self.context_length} to {new_context_length}")
         self.context_length = new_context_length

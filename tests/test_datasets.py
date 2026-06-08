@@ -3,6 +3,7 @@ from pathlib import Path
 
 import torch
 
+from birder_clip.data.datasets import webdataset
 from birder_clip.data.datasets.csv import ImageTextCsvDataset
 from birder_clip.data.datasets.csv import _resolve_image_path
 from birder_clip.data.datasets.fake import FakeImageTextData
@@ -55,3 +56,8 @@ class TestDatasets(unittest.TestCase):
         self.assertIsNotNone(image)
         self.assertSequenceEqual(text.shape, (tokenizer.context_length,))
         self.assertEqual(text.dtype, torch.long)
+
+    def test_wds_decode_caption(self) -> None:
+        self.assertEqual(webdataset.decode_caption("caption"), "caption")
+        self.assertEqual(webdataset.decode_caption(b"caption"), "caption")
+        self.assertEqual(webdataset.decode_caption({"caption": "caption"}), "caption")

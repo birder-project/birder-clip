@@ -37,7 +37,7 @@ class TestLib(unittest.TestCase):
                 tokenizer="openai_clip_bpe",
                 tag="exp",
             ),
-            "clip_maxvit_s_text_transformer_openai_clip_bpe_d512_exp",
+            "clip_maxvit_s_openai_clip_bpe_d512_exp",
         )
 
     def test_image_text_model_config(self) -> None:
