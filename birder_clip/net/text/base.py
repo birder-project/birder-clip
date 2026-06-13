@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 class TextBaseNet(nn.Module):
     default_context_length = 77
+    block_group_regex: Optional[str]
     task = str(Task.TEXT)
 
     def __init__(self, *, config: Optional[dict[str, Any]] = None, context_length: Optional[int] = None) -> None:

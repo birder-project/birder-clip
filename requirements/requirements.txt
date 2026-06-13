@@ -1,4 +1,4 @@
-birder>=0.5.4
+birder>=0.5.6
 
 ftfy>=6.3.1
 regex>=2025.7.29

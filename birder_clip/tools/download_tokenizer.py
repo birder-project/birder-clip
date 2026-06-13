@@ -8,6 +8,7 @@ from birder_clip.model_registry import Task
 from birder_clip.model_registry import registry
 from birder_clip.tokenizers.hf import HFTokenizer
 from birder_clip.tokenizers.hf import download_hf_tokenizer
+from birder_clip.tokenizers.openvision import OpenVisionTokenizer
 from birder_clip.tokenizers.registry import exists as tokenizer_exists
 from birder_clip.tokenizers.registry import get_tokenizer_info
 
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 def _resolve_hf_tokenizer_name(tokenizer: str) -> str:
     if tokenizer_exists(tokenizer) is True:
         factory, tokenizer_kwargs = get_tokenizer_info(tokenizer)
-        if factory is not HFTokenizer:
+        if factory not in (HFTokenizer, OpenVisionTokenizer):
             raise cli.ValidationError(f"{tokenizer} is not a Hugging Face tokenizer")
         if "source" not in tokenizer_kwargs:
             raise cli.ValidationError(f"{tokenizer} does not define a Hugging Face tokenizer source")
@@ -25,11 +26,11 @@ def _resolve_hf_tokenizer_name(tokenizer: str) -> str:
         return tokenizer_kwargs["source"]  # type: ignore[no-any-return]
 
     if registry.exists(tokenizer, task=Task.IMAGE_TEXT) is True:
-        config = registry.all_nets[tokenizer.lower()].config  # type: ignore[misc]
-        if config is None or "tokenizer" not in config:
+        tokenizer_name = registry.get_default_tokenizer(tokenizer)
+        if tokenizer_name is None:
             raise cli.ValidationError(f"{tokenizer} does not define a tokenizer")
 
-        return _resolve_hf_tokenizer_name(config["tokenizer"])
+        return _resolve_hf_tokenizer_name(tokenizer_name)
 
     raise cli.ValidationError(f"{tokenizer} is not a registered tokenizer or image-text model")
 

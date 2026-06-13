@@ -10,6 +10,9 @@ import torch
 
 class Tokenizer(Protocol):
     context_length: int
+    num_special_tokens: int
+
+    def encode(self, text: str) -> list[int]: ...
 
     def __call__(self, texts: str | list[str], context_length: Optional[int] = None) -> torch.LongTensor: ...
 

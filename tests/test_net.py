@@ -128,7 +128,7 @@ class TestCLIPNetworks(unittest.TestCase):
         self.assertSetEqual(set(out.keys()), {"image_features", "text_features", "logit_scale", "logit_bias"})
         self.assertSequenceEqual(out["image_features"].shape, (2, 12))
         self.assertSequenceEqual(out["text_features"].shape, (2, 12))
-        self.assertEqual(out["logit_scale"].ndim, 0)
+        self.assertEqual(out["logit_scale"].ndim, 1)
         self.assertIsNone(out["logit_bias"])
         self.assertTrue(torch.isfinite(out["image_features"]).all())
         self.assertTrue(torch.isfinite(out["text_features"]).all())

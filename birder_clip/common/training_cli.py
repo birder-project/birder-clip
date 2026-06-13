@@ -49,7 +49,9 @@ def add_loss_args(parser: argparse.ArgumentParser) -> None:
 def add_optimization_args(parser: argparse.ArgumentParser, default_batch_size: int = 32) -> None:
     group = parser.add_argument_group("Optimization parameters")
     group.add_argument("--batch-size", type=int, default=default_batch_size, metavar="N", help="the batch size")
-    group.add_argument("--opt", type=str, choices=list(get_args(OptimizerType)), default="sgd", help="optimizer to use")
+    group.add_argument(
+        "--opt", type=str, choices=list(get_args(OptimizerType)), default="adamw", help="optimizer to use"
+    )
     group.add_argument("--opt-fused", default=False, action="store_true", help="use fused optimizer implementation")
     group.add_argument("--momentum", type=float, default=0.9, metavar="M", help="optimizer momentum")
     group.add_argument("--nesterov", default=False, action="store_true", help="use nesterov momentum")
@@ -318,7 +320,13 @@ def add_dataloader_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="keep dataloader worker processes alive between epochs",
     )
-    group.add_argument("--drop-last", default=False, action="store_true", help="drop the last incomplete batch")
+    group.add_argument(
+        "--no-drop-last",
+        dest="drop_last",
+        default=True,
+        action="store_false",
+        help="do not drop the last incomplete batch",
+    )
 
 
 def add_precision_args(parser: argparse.ArgumentParser) -> None:
@@ -410,6 +418,44 @@ def add_distributed_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument("--local-rank", type=int, metavar="N", help="local rank")
     group.add_argument("--dist-url", type=str, default="env://", help="URL used to initialize distributed training")
     group.add_argument("--dist-backend", type=str, default="nccl", help="distributed backend")
+    group.add_argument(
+        "--distributed-mode", type=str, choices=["ddp", "fsdp"], default="ddp", help="distributed training mode"
+    )
+    group.add_argument(
+        "--fsdp-sharding-strategy",
+        type=str,
+        choices=["shard-grad-op", "full-shard"],
+        default="shard-grad-op",
+        help="FSDP sharding strategy",
+    )
+    group.add_argument(
+        "--fsdp-param-dtype",
+        type=str,
+        choices=["float32", "float16", "bfloat16"],
+        help="FSDP mixed precision parameter dtype",
+    )
+    group.add_argument(
+        "--fsdp-reduce-dtype",
+        type=str,
+        choices=["float32", "float16", "bfloat16"],
+        help="FSDP mixed precision gradient reduction dtype",
+    )
+    group.add_argument(
+        "--fsdp-wrap-policy",
+        type=str,
+        choices=["block-group-regex", "min-num-params"],
+        default="block-group-regex",
+        help="FSDP module wrapping policy",
+    )
+    group.add_argument(
+        "--fsdp-wrap-min-num-params",
+        type=float,
+        metavar="M",
+        help="minimum module parameter count in millions for wrapping when using --fsdp-wrap-policy min-num-params",
+    )
+    group.add_argument(
+        "--fsdp-offload-policy", type=str, choices=["none", "cpu"], default="none", help="FSDP parameter offload policy"
+    )
     group.add_argument(
         "--find-unused-parameters",
         default=False,
@@ -561,3 +607,23 @@ def common_args_validation(args: argparse.Namespace) -> None:
         raise cli.ValidationError("--grad-accum-steps must be >= 1")
     if args.model_ema_steps < 1:
         raise cli.ValidationError("--model-ema-steps must be >= 1")
+
+    if args.distributed_mode == "fsdp":
+        if args.sync_bn is True:
+            raise cli.ValidationError("--sync-bn cannot be used with --distributed-mode fsdp")
+        if args.find_unused_parameters is True:
+            raise cli.ValidationError("--find-unused-parameters cannot be used with --distributed-mode fsdp")
+        if args.compile_opt is True:
+            raise cli.ValidationError("--compile-opt cannot be used with --distributed-mode fsdp")
+        if args.compile_fullgraph is True:
+            raise cli.ValidationError("--compile-fullgraph cannot be used with --distributed-mode fsdp")
+        if args.cpu is True:
+            raise cli.ValidationError("--cpu cannot be used with --distributed-mode fsdp")
+        if args.model_ema is True:
+            raise cli.ValidationError("--model-ema cannot be used with --distributed-mode fsdp")
+        if args.fsdp_wrap_policy == "min-num-params" and args.fsdp_wrap_min_num_params is None:
+            raise cli.ValidationError(
+                "--fsdp-wrap-min-num-params is required when --fsdp-wrap-policy is min-num-params"
+            )
+        if args.fsdp_wrap_min_num_params is not None and args.fsdp_wrap_min_num_params <= 0:
+            raise cli.ValidationError("--fsdp-wrap-min-num-params must be > 0")

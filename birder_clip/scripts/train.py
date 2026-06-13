@@ -14,6 +14,7 @@ import numpy as np
 import torch
 import torchinfo
 from birder.common import cli
+from birder.common import fsdp_utils
 from birder.common import training_utils
 from birder.common.lib import format_duration
 from birder.conf import settings
@@ -23,6 +24,7 @@ from birder.data.datasets.webdataset import wds_args_from_info
 from birder.data.transforms.classification import get_rgb_stats
 from birder.data.transforms.classification import inference_preset
 from birder.data.transforms.classification import training_preset
+from torch.distributed.fsdp import register_fsdp_forward_method
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -43,11 +45,50 @@ from birder_clip.tokenizers import get_tokenizer
 logger = logging.getLogger(__name__)
 
 
+def _encoder_fsdp_wrap_modules(
+    encoder: torch.nn.Module, args: argparse.Namespace, *, encoder_name: str
+) -> list[torch.nn.Module]:
+    if args.fsdp_wrap_policy == "min-num-params":
+        min_num_params = int(args.fsdp_wrap_min_num_params * 1_000_000)
+        matched_modules = fsdp_utils.modules_from_min_num_params(encoder, min_num_params=min_num_params)
+        if len(matched_modules) == 0:
+            logger.warning(
+                f"FSDP min-num-params policy with threshold {args.fsdp_wrap_min_num_params:g}M "
+                f"did not match any module on {encoder_name}"
+            )
+
+        return matched_modules
+
+    block_group_regex = getattr(encoder, "block_group_regex", None)
+    if block_group_regex is None:
+        logger.warning(f"No block_group_regex on {encoder_name}, using root-only FSDP for this encoder")
+        return []
+
+    matched_modules = fsdp_utils.modules_from_block_group_regex(encoder, block_group_regex)
+    if len(matched_modules) == 0:
+        logger.warning(f"FSDP wrap regex '{block_group_regex}' did not match any module on {encoder_name}")
+
+    return matched_modules
+
+
+def _clip_fsdp_wrap_modules(net: torch.nn.Module, args: argparse.Namespace) -> list[torch.nn.Module]:
+    image_wrap_modules = _encoder_fsdp_wrap_modules(net.image_encoder, args, encoder_name="image_encoder")
+    text_wrap_modules = _encoder_fsdp_wrap_modules(net.text_encoder, args, encoder_name="text_encoder")
+    wrap_modules = [*image_wrap_modules, *text_wrap_modules]
+    logger.info(
+        f"FSDP wrap modules resolved: {len(wrap_modules)} "
+        f"(image_encoder={len(image_wrap_modules)}, text_encoder={len(text_wrap_modules)})"
+    )
+
+    return wrap_modules
+
+
 def train(args: argparse.Namespace) -> None:
     #
     # Initialize
     #
     device, device_id, disable_tqdm = training_utils.init_training(args, logger)
+    fsdp_mode = fsdp_utils.is_fsdp_mode(args)
 
     if args.size is None:
         args.size = registry.get_default_size(args.network, image_encoder=args.image_encoder)
@@ -334,6 +375,12 @@ def train(args: argparse.Namespace) -> None:
     if args.fast_matmul is True or args.amp is True:
         torch.set_float32_matmul_precision("high")
 
+    if fsdp_mode is True:
+        fsdp_wrap_modules = _clip_fsdp_wrap_modules(net, args)
+        net = fsdp_utils.setup_fsdp(net, args, wrap_modules=fsdp_wrap_modules)
+        register_fsdp_forward_method(net, "encode_image")
+        register_fsdp_forward_method(net, "encode_text")
+
     # Compile network
     if args.compile is True:
         net = torch.compile(net, fullgraph=args.compile_fullgraph, mode=args.compile_mode)
@@ -389,7 +436,13 @@ def train(args: argparse.Namespace) -> None:
 
     # Load states
     if args.load_states is True:
-        optimizer.load_state_dict(training_states.optimizer_state)
+        if fsdp_mode is True:
+            fsdp_utils.load_full_optimizer_state_dict(
+                net, optimizer, training_states.optimizer_state  # type: ignore[arg-type]
+            )
+        else:
+            optimizer.load_state_dict(training_states.optimizer_state)
+
         scheduler.load_state_dict(training_states.scheduler_state)
         if scaler is not None:
             scaler.load_state_dict(training_states.scaler_state)
@@ -432,7 +485,7 @@ def train(args: argparse.Namespace) -> None:
     logger.debug(f"EMA warmup steps = {ema_warmup_steps}")
     net_without_ddp = net
     no_sync_cm = nullcontext
-    if args.distributed is True:
+    if args.distributed is True and fsdp_mode is False:
         net = torch.nn.parallel.DistributedDataParallel(
             net,
             device_ids=[args.local_rank],
@@ -500,15 +553,6 @@ def train(args: argparse.Namespace) -> None:
     signature = get_image_text_signature(sample_shape, tokenizer.context_length)
     file_handler: logging.Handler = logging.NullHandler()
     if training_utils.is_global_primary(args) is True:
-        with torch.no_grad():
-            summary_writer.add_graph(
-                net_for_info,
-                (
-                    torch.rand(sample_shape, device=device, dtype=model_dtype),
-                    torch.zeros(text_shape, device=device, dtype=torch.long),
-                ),
-            )
-
         summary_writer.flush()
         fs_ops.write_config(network_name, net_for_info, signature=signature, rgb_stats=rgb_stats)
         file_handler = clip_training_utils.setup_file_logging(training_log_path.joinpath("training.log"))
@@ -575,6 +619,11 @@ def train(args: argparse.Namespace) -> None:
                 effective_accum_steps = last_accum_steps
             else:
                 effective_accum_steps = grad_accum_steps
+
+            if fsdp_mode is True and grad_accum_steps > 1:
+                net.set_requires_gradient_sync(requires_gradient_sync=optimizer_update)
+            if fsdp_mode is True and args.no_broadcast_buffers is False:
+                fsdp_utils.broadcast_module_buffers(net)
 
             # Forward and backward
             with sync_context():
@@ -752,6 +801,7 @@ def train(args: argparse.Namespace) -> None:
                 scheduler,
                 scaler,
                 model_base,
+                fsdp_mode=fsdp_mode,
             )
             if args.keep_last is not None and training_utils.is_global_primary(args) is True:
                 fs_ops.clean_checkpoints(network_name, args.keep_last)
@@ -803,6 +853,7 @@ def train(args: argparse.Namespace) -> None:
             scheduler,
             scaler,
             model_base,
+            fsdp_mode=fsdp_mode,
         )
 
     training_utils.shutdown_distributed_mode(args)
@@ -853,7 +904,7 @@ def get_args_parser() -> argparse.ArgumentParser:
             "    --compile \\\n"
             "    --wds \\\n"
             "    --wds-info https://huggingface.co/datasets/pixparse/cc12m-wds/resolve/main/_info.json \\\n"
-            "    --wds-split train\n"
+            "    --wds-training-split train\n"
         ),
         formatter_class=cli.ArgumentHelpFormatter,
     )

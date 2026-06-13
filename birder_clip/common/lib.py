@@ -86,7 +86,7 @@ def get_image_text_model_config(
 
     if config is not None:
         for key, value in config.items():
-            if key in {"image", "text"} and isinstance(value, dict) is True:
+            if key in {"image", "text"} and isinstance(value, dict):
                 model_config[key] = {**model_config.get(key, {}), **value}
             else:
                 model_config[key] = value

@@ -204,6 +204,8 @@ class Encoder(nn.Module):
 
 
 class TextTransformer(TextBaseNet):
+    block_group_regex = r"encoder\.block\.(\d+)"
+
     def __init__(self, *, config: Optional[dict[str, Any]] = None, context_length: Optional[int] = None) -> None:
         super().__init__(config=config, context_length=context_length)
         assert self.config is not None, "must set config"

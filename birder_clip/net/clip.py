@@ -41,9 +41,9 @@ class CLIP(BaseNet):
 
         self.image_encoder = image_encoder
         self.text_encoder = text_encoder
-        self.logit_scale = nn.Parameter(torch.ones([]) * math.log(1 / 0.07))
+        self.logit_scale = nn.Parameter(torch.ones(1) * math.log(1 / 0.07))
         if "init_logit_bias" in self.config:
-            self.logit_bias = nn.Parameter(torch.ones([]) * self.config["init_logit_bias"])
+            self.logit_bias = nn.Parameter(torch.ones(1) * self.config["init_logit_bias"])
         else:
             self.logit_bias = None
 
@@ -112,6 +112,127 @@ registry.register_model_config(
     },
 )
 
+# LAION CLIP - laion/CLIP-ViT-L-14-laion2B-s32B-b82K
+registry.register_model_config(
+    "laion_clip_vit_l14",
+    CLIP,
+    config={
+        "image": {
+            "network": "vit_l14_pn",
+            "size": (224, 224),
+        },
+        "text": {
+            "network": "text_transformer",
+            "config": {
+                "hidden_dim": 768,
+                "num_heads": 12,
+                "output_dim": 768,
+            },
+        },
+        "embed_dim": 768,
+        "tokenizer": "openai_clip_bpe",
+    },
+)
+
+# LAION CLIP - laion/CLIP-ViT-H-14-laion2B-s32B-b79K
+registry.register_model_config(
+    "laion_clip_vit_h14",
+    CLIP,
+    config={
+        "image": {
+            "network": "vit_h14_pn",
+            "size": (224, 224),
+        },
+        "text": {
+            "network": "text_transformer",
+            "config": {
+                "hidden_dim": 1024,
+                "num_heads": 16,
+                "num_layers": 24,
+                "output_dim": 1024,
+            },
+        },
+        "embed_dim": 1024,
+        "tokenizer": "openai_clip_bpe",
+    },
+)
+
+# LAION CLIP - laion/CLIP-convnext_base_w-laion2B-s13B-b82K
+registry.register_model_config(
+    "laion_clip_convnext_v1_base",
+    CLIP,
+    config={
+        "image": {
+            "network": "convnext_v1_base",
+            "config": {"drop_path_rate": 0.1},
+            "size": (320, 320),
+        },
+        "text": {
+            "network": "text_transformer",
+            "config": {
+                "hidden_dim": 640,
+                "num_heads": 10,
+                "output_dim": 640,
+            },
+        },
+        "embed_dim": 640,
+        "tokenizer": "openai_clip_bpe",
+    },
+)
+
+# OpenVision - https://arxiv.org/abs/2505.04601
+registry.register_model_config(
+    "openvision_v1_vit_b16",
+    CLIP,
+    config={
+        "image": {
+            "network": "vit_reg1_b16_nap_avg",
+            "config": {"drop_path_rate": 0.0},
+            "size": (384, 384),
+        },
+        "text": {
+            "network": "text_transformer",
+            "config": {
+                "vocab_size": 32000,
+                "causal_mask": False,
+                "pool_type": "last",
+                "norm_layer_eps": 1e-6,
+                "act_layer_type": "gelu_tanh",
+            },
+            "context_length": 80,
+        },
+        "embed_dim": 512,
+        "tokenizer": "openvision",
+    },
+)
+registry.register_model_config(
+    "openvision_v1_vit_l14",
+    CLIP,
+    config={
+        "image": {
+            "network": "vit_reg1_l14_nap_avg",
+            "config": {"drop_path_rate": 0.0},
+            "size": (224, 224),
+        },
+        "text": {
+            "network": "text_transformer",
+            "config": {
+                "vocab_size": 32000,
+                "hidden_dim": 768,
+                "num_heads": 12,
+                "output_dim": 768,
+                "causal_mask": False,
+                "pool_type": "last",
+                "norm_layer_eps": 1e-6,
+                "act_layer_type": "gelu_tanh",
+            },
+            "context_length": 80,
+        },
+        "embed_dim": 768,
+        "tokenizer": "openvision",
+    },
+)
+
 # PE Core - https://arxiv.org/abs/2504.13181
 registry.register_model_config(
     "pe_core_s16",
@@ -174,13 +295,74 @@ registry.register_model_config(
     },
 )
 
+# SigLIP - https://arxiv.org/abs/2303.15343
+registry.register_model_config(
+    "siglip_v1_vit_b16",
+    CLIP,
+    config={
+        "image": {
+            "network": "vit_b16_ap",  # NOTE: Change to vit_b16_ap_c1 when next version of Birder released
+            "num_classes": 0,
+            "size": (384, 384),
+        },
+        "text": {
+            "network": "text_transformer",
+            "config": {
+                "vocab_size": 32000,
+                "hidden_dim": 768,
+                "num_heads": 12,
+                "num_layers": 12,
+                "output_dim": 768,
+                "causal_mask": False,
+                "pool_type": "last",
+                "proj_bias": True,
+                "norm_layer_eps": 1e-6,
+            },
+            "context_length": 64,
+        },
+        "embed_dim": 768,
+        "tokenizer": "siglip_t5",
+        "init_logit_bias": -10.0,
+    },
+)
+
 # SigLIP 2 - https://arxiv.org/abs/2502.14786
+registry.register_model_config(
+    "siglip_v2_vit_l16",
+    CLIP,
+    config={
+        "image": {
+            "network": "vit_l16_ap_c1",
+            "num_classes": 0,
+            "size": (256, 256),
+        },
+        "text": {
+            "network": "text_transformer",
+            "config": {
+                "vocab_size": 256000,
+                "hidden_dim": 1024,
+                "num_heads": 16,
+                "num_layers": 24,
+                "output_dim": 1024,
+                "causal_mask": False,
+                "pool_type": "last",
+                "proj_bias": True,
+                "norm_layer_eps": 1e-6,
+                "act_layer_type": "gelu_tanh",
+            },
+            "context_length": 64,
+        },
+        "embed_dim": 1024,
+        "tokenizer": "siglip2_gemma",
+        "init_logit_bias": -10.0,
+    },
+)
 registry.register_model_config(
     "siglip_v2_vit_so400m_p14",
     CLIP,
     config={
         "image": {
-            "network": "vit_so400m_p14_ap",
+            "network": "vit_so400m_p14_ap_c1",
             "num_classes": 0,
             "size": (224, 224),
         },
@@ -204,6 +386,129 @@ registry.register_model_config(
         "embed_dim": 1152,
         "tokenizer": "siglip2_gemma",
         "init_logit_bias": -10.0,
+    },
+)
+
+# MobileCLIP 2 - https://arxiv.org/abs/2508.20691
+registry.register_model_config(
+    "mobileclip_v2_s0",
+    CLIP,
+    config={
+        "image": {
+            "network": "mobileclip_v1_i0",
+            "size": (256, 256),
+        },
+        "text": {
+            "network": "text_transformer",
+            "config": {
+                "causal_mask": False,
+            },
+        },
+        "embed_dim": 512,
+        "tokenizer": "openai_clip_bpe",
+    },
+)
+registry.register_model_config(
+    "mobileclip_v2_s2",
+    CLIP,
+    config={
+        "image": {
+            "network": "mobileclip_v1_i2",
+            "size": (256, 256),
+        },
+        "text": {
+            "network": "text_transformer",
+            "config": {
+                "causal_mask": False,
+            },
+        },
+        "embed_dim": 512,
+        "tokenizer": "openai_clip_bpe",
+    },
+)
+registry.register_model_config(
+    "mobileclip_v2_s3",
+    CLIP,
+    config={
+        "image": {
+            "network": "mobileclip_v2_i3",
+            "size": (256, 256),
+        },
+        "text": {
+            "network": "text_transformer",
+            "config": {
+                "hidden_dim": 768,
+                "num_heads": 12,
+                "output_dim": 768,
+                "causal_mask": False,
+            },
+        },
+        "embed_dim": 768,
+        "tokenizer": "openai_clip_bpe",
+    },
+)
+registry.register_model_config(
+    "mobileclip_v2_s4",
+    CLIP,
+    config={
+        "image": {
+            "network": "mobileclip_v2_i4",
+            "size": (256, 256),
+        },
+        "text": {
+            "network": "text_transformer",
+            "config": {
+                "hidden_dim": 768,
+                "num_heads": 12,
+                "output_dim": 768,
+                "causal_mask": False,
+            },
+        },
+        "embed_dim": 768,
+        "tokenizer": "openai_clip_bpe",
+    },
+)
+
+# MetaCLIP 2 - https://arxiv.org/abs/2507.22062
+registry.register_model_config(
+    "metaclip_v2_worldwide_b16",
+    CLIP,
+    config={
+        "image": {
+            "network": "vit_b16_pn",
+            "size": (384, 384),
+        },
+        "text": {
+            "network": "text_transformer",
+            "config": {
+                "vocab_size": 901629,
+                "eos_token_id": 2,
+            },
+        },
+        "embed_dim": 512,
+        "tokenizer": "metaclip2_worldwide_bpe",
+    },
+)
+registry.register_model_config(
+    "metaclip_v2_worldwide_l14",
+    CLIP,
+    config={
+        "image": {
+            "network": "vit_l14_pn",
+            "size": (224, 224),
+        },
+        "text": {
+            "network": "text_transformer",
+            "config": {
+                "vocab_size": 901629,
+                "hidden_dim": 768,
+                "num_heads": 12,
+                "output_dim": 768,
+                "eos_token_id": 2,
+            },
+        },
+        "embed_dim": 768,
+        "tokenizer": "metaclip2_worldwide_bpe",
     },
 )
 
@@ -242,6 +547,29 @@ registry.register_model_config(
             },
         },
         "embed_dim": 768,
+        "tokenizer": "openai_clip_bpe",
+    },
+)
+
+# BioCLIP 2.5 - https://arxiv.org/abs/2505.23883
+registry.register_model_config(
+    "bioclip_v25_vit_h14",
+    CLIP,
+    config={
+        "image": {
+            "network": "vit_h14_pn",
+            "size": (224, 224),
+        },
+        "text": {
+            "network": "text_transformer",
+            "config": {
+                "hidden_dim": 1024,
+                "num_heads": 16,
+                "num_layers": 24,
+                "output_dim": 1024,
+            },
+        },
+        "embed_dim": 1024,
         "tokenizer": "openai_clip_bpe",
     },
 )

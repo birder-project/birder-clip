@@ -83,6 +83,7 @@ class SimpleTokenizer:
         self.decoder = {value: key for key, value in self.encoder.items()}
         self.bpe_ranks = dict(zip(merges, range(len(merges))))
         self.cache = {token: token for token in special_tokens}
+        self.num_special_tokens = len(special_tokens)
 
         special_pattern = "|".join(re.escape(token) for token in special_tokens)
         self.pat = re.compile(

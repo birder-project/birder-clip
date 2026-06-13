@@ -6,6 +6,7 @@ from typing import Optional
 
 import torch
 import torch.distributed as dist
+from birder.common import fsdp_utils
 from birder.common import training_utils as birder_training_utils
 
 from birder_clip.common import fs_ops
@@ -39,23 +40,60 @@ def save_training_checkpoint(
     scaler: Optional[torch.amp.grad_scaler.GradScaler],
     model_base: Optional[torch.nn.Module],
     *,
+    fsdp_mode: bool = False,
+    fsdp_model_state: Optional[dict[str, Any]] = None,
     external_config: Optional[dict[str, Any]] = None,
     **extra_states: Optional[dict[str, Any]],
 ) -> None:
-    if birder_training_utils.is_global_primary(args) is True:
-        fs_ops.checkpoint_model(
-            network_name,
-            epoch,
-            net,
-            signature,
-            rgb_stats,
-            optimizer,
-            scheduler,
-            scaler,
-            model_base,
-            external_config=external_config,
-            **extra_states,
-        )
+    if fsdp_mode is True:
+        if fsdp_model_state is not None:
+            model_state = fsdp_model_state
+        else:
+            model_state = fsdp_utils.gather_full_model_state_dict(net)
 
-    if birder_training_utils.is_dist_available_and_initialized() is True:
-        dist.barrier()
+        optimizer_state = None
+        scheduler_state = None
+        scaler_state = None
+        model_base_state = None
+        if optimizer is not None and scheduler is not None:
+            optimizer_state = fsdp_utils.gather_full_optimizer_state_dict(net, optimizer)
+            scheduler_state = scheduler.state_dict()
+            if scaler is not None:
+                scaler_state = scaler.state_dict()
+            if model_base is not None:
+                model_base_state = model_base.state_dict()
+
+        if birder_training_utils.is_global_primary(args) is True:
+            fs_ops.checkpoint_model_from_state_dicts(
+                network_name,
+                epoch,
+                model_state,
+                net.task,
+                signature,
+                rgb_stats,
+                optimizer_state,
+                scheduler_state,
+                scaler_state,
+                model_base_state,
+                external_config=external_config,
+                **extra_states,
+            )
+
+        if birder_training_utils.is_dist_available_and_initialized() is True:
+            dist.barrier()
+
+    else:
+        if birder_training_utils.is_global_primary(args) is True:
+            fs_ops.checkpoint_model(
+                network_name,
+                epoch,
+                net,
+                signature,
+                rgb_stats,
+                optimizer,
+                scheduler,
+                scaler,
+                model_base,
+                external_config=external_config,
+                **extra_states,
+            )

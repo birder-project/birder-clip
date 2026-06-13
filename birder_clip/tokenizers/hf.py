@@ -65,6 +65,15 @@ class HFTokenizer:
             local_files_only=True,
             **kwargs,
         )
+        self.num_special_tokens = self.tokenizer.num_special_tokens_to_add(pair=False)
+
+    def encode(self, text: str) -> list[int]:
+        return self.tokenizer(  # type: ignore[no-any-return]
+            self.clean_fn(text),
+            add_special_tokens=False,
+            truncation=False,
+            padding=False,
+        ).input_ids
 
     def __call__(self, texts: str | list[str], context_length: Optional[int] = None) -> torch.LongTensor:
         if isinstance(texts, str):
@@ -81,6 +90,10 @@ class HFTokenizer:
 
 register_tokenizer_prefix("hf:", HFTokenizer)
 
+register_tokenizer("siglip_t5", HFTokenizer, source="timm/ViT-B-16-SigLIP", context_length=64, clean="canonicalize")
 register_tokenizer(
     "siglip2_gemma", HFTokenizer, source="timm/ViT-SO400M-14-SigLIP2", context_length=64, clean="canonicalize"
+)
+register_tokenizer(
+    "metaclip2_worldwide_bpe", HFTokenizer, source="facebook/metaclip-2-worldwide-b16-384", context_length=77
 )

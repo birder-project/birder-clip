@@ -67,7 +67,7 @@ def model_path(
     network_name: str,
     *,
     epoch: Optional[int | str] = None,
-    file_format: FileFormatType = "pt",
+    st: bool = False,
     states: bool = False,
 ) -> Path:
     if epoch is not None:
@@ -77,8 +77,10 @@ def model_path(
 
     if states is True:
         file_name = f"{file_name}_states.pt"
+    elif st is True:
+        file_name = f"{file_name}.safetensors"
     else:
-        file_name = f"{file_name}.{file_format}"
+        file_name = f"{file_name}.pt"
 
     return settings.MODELS_DIR.joinpath(file_name)
 
@@ -107,6 +109,30 @@ def _checkpoint_states(
 
     logger.info(f"Saving training states {states_path}...")
     torch.save(kwargs, states_path)
+
+
+def _checkpoint_states_from_state_dicts(
+    states_path: Path,
+    optimizer_state: Optional[dict[str, Any]],
+    scheduler_state: Optional[dict[str, Any]],
+    scaler_state: Optional[dict[str, Any]],
+    model_base_state: Optional[dict[str, Any]],
+    **extra_states: Optional[dict[str, Any]],
+) -> None:
+    if optimizer_state is None or scheduler_state is None:
+        return
+
+    logger.info(f"Saving checkpoint states {states_path}...")
+    torch.save(
+        {
+            "optimizer_state": optimizer_state,
+            "scheduler_state": scheduler_state,
+            "scaler_state": scaler_state,
+            "model_base_state": model_base_state,
+            **extra_states,
+        },
+        states_path,
+    )
 
 
 class TrainingStates(NamedTuple):
@@ -180,6 +206,50 @@ def checkpoint_model(
     )
 
     _checkpoint_states(states_path, optimizer, scheduler, scaler, model_base, **extra_states)
+
+
+def checkpoint_model_from_state_dicts(
+    network_name: str,
+    epoch: int,
+    model_state: dict[str, Any],
+    task: Any,
+    signature: SignatureType,
+    rgb_stats: RGBType,
+    optimizer_state: Optional[dict[str, Any]],
+    scheduler_state: Optional[dict[str, Any]],
+    scaler_state: Optional[dict[str, Any]],
+    model_base_state: Optional[dict[str, Any]],
+    *,
+    external_config: Optional[dict[str, Any]] = None,
+    **extra_states: Optional[dict[str, Any]],
+) -> None:
+    kwargs = {}
+    if external_config is not None:
+        kwargs["config"] = external_config
+
+    path = model_path(network_name, epoch=epoch)
+    states_path = model_path(network_name, epoch=epoch, states=True)
+    logger.info(f"Saving model checkpoint {path}...")
+    torch.save(
+        {
+            "state": model_state,
+            "birder_clip_version": __version__,
+            "task": task,
+            "signature": signature,
+            "rgb_stats": rgb_stats,
+            **kwargs,
+        },
+        path,
+    )
+
+    _checkpoint_states_from_state_dicts(
+        states_path,
+        optimizer_state,
+        scheduler_state,
+        scaler_state,
+        model_base_state,
+        **extra_states,
+    )
 
 
 def clean_checkpoints(network_name: str, keep_last: int) -> None:
@@ -314,7 +384,7 @@ def load_model(
             embed_dim=embed_dim,
             tokenizer=tokenizer,
         )
-        path = model_path(_network_name, epoch=epoch, file_format="safetensors" if st is True else "pt")
+        path = model_path(_network_name, epoch=epoch, st=st)
 
     logger.info(f"Loading model from {path} on device {device}...")
 
@@ -587,6 +657,33 @@ def load_pretrained_tokenizer(weights: str, *, download: bool = True, **kwargs: 
             download_hf_tokenizer(hf_source)
 
     return get_tokenizer(tokenizer_name, **tokenizer_kwargs)
+
+
+def save_st(
+    net: torch.nn.Module,
+    dst: str,
+    task: str,
+    signature: SignatureType,
+    rgb_stats: RGBType,
+    *,
+    external_config: Optional[dict[str, Any]] = None,
+) -> None:
+    assert _HAS_SAFETENSORS, "'pip install safetensors' to use .safetensors"
+    kwargs = {}
+    if external_config is not None:
+        kwargs["config"] = json.dumps(external_config)
+
+    safetensors.torch.save_model(
+        net,
+        str(dst),
+        {
+            "birder_clip_version": __version__,
+            "task": task,
+            "signature": json.dumps(signature),
+            "rgb_stats": json.dumps(rgb_stats),
+            **kwargs,
+        },
+    )
 
 
 def download_model_by_weights(

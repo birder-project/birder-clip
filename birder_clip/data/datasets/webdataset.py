@@ -24,10 +24,10 @@ def decode_caption(caption: Any, caption_json_key: str = "caption") -> str:
     if isinstance(caption, bytes):
         caption = caption.decode("utf-8")
 
-    if isinstance(caption, str) is False:
+    if not isinstance(caption, str):
         raise TypeError(f"WebDataset caption must be a string, got {type(caption).__name__}")
 
-    return caption  # type: ignore[no-any-return]
+    return caption
 
 
 def tokenize_caption(caption: str, tokenizer: Tokenizer) -> torch.Tensor:
