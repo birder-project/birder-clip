@@ -66,6 +66,7 @@ class HFTokenizer:
             **kwargs,
         )
         self.num_special_tokens = self.tokenizer.num_special_tokens_to_add(pair=False)
+        self.pad_token_id = self.tokenizer.pad_token_id
 
     def encode(self, text: str) -> list[int]:
         return self.tokenizer(  # type: ignore[no-any-return]
@@ -94,6 +95,7 @@ register_tokenizer("siglip_t5", HFTokenizer, source="timm/ViT-B-16-SigLIP", cont
 register_tokenizer(
     "siglip2_gemma", HFTokenizer, source="timm/ViT-SO400M-14-SigLIP2", context_length=64, clean="canonicalize"
 )
+register_tokenizer("metaclip_v1_bpe", HFTokenizer, source="facebook/metaclip-b16-fullcc2.5b", context_length=77)
 register_tokenizer(
     "metaclip2_worldwide_bpe", HFTokenizer, source="facebook/metaclip-2-worldwide-b16-384", context_length=77
 )

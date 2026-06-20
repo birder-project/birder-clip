@@ -32,7 +32,7 @@ class TestLib(unittest.TestCase):
             lib.get_image_text_network_name(
                 "clip",
                 image_encoder="maxvit_s",
-                text_encoder="text_transformer",
+                text_encoder="transformer_encoder",
                 embed_dim=512,
                 tokenizer="openai_clip_bpe",
                 tag="exp",
@@ -50,7 +50,7 @@ class TestLib(unittest.TestCase):
                 "size": (224, 224),
             },
             "text": {
-                "network": "text_transformer",
+                "network": "transformer_encoder",
                 "config": {
                     "hidden_dim": 512,
                 },
@@ -77,7 +77,7 @@ class TestLib(unittest.TestCase):
         self.assertEqual(model_config["image"]["size"], (336, 336))
         self.assertEqual(model_config["image"]["extra"], True)
         self.assertEqual(model_config["image"]["config"]["drop_path_rate"], 0.1)
-        self.assertEqual(model_config["text"]["network"], "text_transformer")
+        self.assertEqual(model_config["text"]["network"], "transformer_encoder")
         self.assertEqual(model_config["text"]["config"]["hidden_dim"], 512)
         self.assertEqual(model_config["text"]["config"]["num_layers"], 12)
         self.assertEqual(model_config["text"]["context_length"], 64)

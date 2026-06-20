@@ -19,6 +19,8 @@ import numpy.typing as npt
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torchvision.transforms import v2
+from torchvision.transforms.v2.functional import five_crop
 from tqdm import tqdm
 
 from birder_clip.net.base import BaseNet
@@ -64,11 +66,40 @@ def build_class_text_embeddings(
 DataloaderInferenceResult = tuple[list[str], npt.NDArray[np.float32], npt.NDArray[np.int64]]
 
 
+def infer_batch(
+    net: BaseNet, inputs: torch.Tensor, text_embeddings: torch.Tensor, tta: bool = False, return_logits: bool = False
+) -> torch.Tensor:
+    if tta is True:
+        _, _, H, W = inputs.size()
+        crop_h = int(H * 0.8)
+        crop_w = int(W * 0.8)
+        tta_inputs = five_crop(inputs, size=[crop_h, crop_w])
+        t = v2.Resize((H, W), interpolation=v2.InterpolationMode.BICUBIC, antialias=True)
+        outs = []
+        for tta_input in tta_inputs:
+            image_embeddings = net.encode_image(t(tta_input), normalize=True)
+            logits = net.forward_logits(image_embeddings, text_embeddings)
+            if return_logits is True:
+                outs.append(logits)
+            else:
+                outs.append(F.softmax(logits, dim=-1))
+
+        return torch.stack(outs).mean(dim=0)
+
+    image_embeddings = net.encode_image(inputs, normalize=True)
+    logits = net.forward_logits(image_embeddings, text_embeddings)
+    if return_logits is True:
+        return logits
+
+    return F.softmax(logits, dim=-1)
+
+
 def infer_dataloader_iter(
     device: torch.device,
-    net: BaseNet | torch.ScriptModule,
+    net: BaseNet,
     dataloader: DataLoader,
     text_embeddings: torch.Tensor,
+    tta: bool = False,
     return_logits: bool = False,
     model_dtype: torch.dtype = torch.float32,
     amp: bool = False,
@@ -92,12 +123,8 @@ def infer_dataloader_iter(
             # Inference
             inputs = inputs.to(device, dtype=model_dtype)
             with torch.amp.autocast(device.type, enabled=amp, dtype=amp_dtype):
-                image_embeddings = net.encode_image(inputs, normalize=True)
-                logits = net.forward_logits(image_embeddings, text_embeddings)
-                if return_logits is True:
-                    out = logits.cpu().float().numpy()
-                else:
-                    out = F.softmax(logits, dim=-1).cpu().float().numpy()
+                out = infer_batch(net, inputs, text_embeddings, return_logits=return_logits, tta=tta)
+                out = out.cpu().float().numpy()
 
             out_list.append(out)
 

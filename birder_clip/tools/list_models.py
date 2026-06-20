@@ -22,7 +22,7 @@ def set_parser(subparsers: Any) -> None:
             "Usage examples:\n"
             "python -m birder_clip.tools list-models\n"
             "python -m birder_clip.tools list-models --image-text\n"
-            "python -m birder_clip.tools list-models --text\n"
+            "python -m birder_clip.tools list-models --text-encoder\n"
             "python -m birder_clip.tools list-models --pretrained\n"
             "python -m birder_clip.tools list-models --pretrained --image-text --verbose\n"
             "python -m birder_clip.tools list-models --pretrained --verbose --filter '*clip*'\n"
@@ -32,7 +32,8 @@ def set_parser(subparsers: Any) -> None:
 
     task_group = subparser.add_mutually_exclusive_group(required=False)
     task_group.add_argument("--image-text", default=False, action="store_true", help="list image-text models")
-    task_group.add_argument("--text", default=False, action="store_true", help="list text models")
+    task_group.add_argument("--text-encoder", default=False, action="store_true", help="list text encoder models")
+    task_group.add_argument("--text-decoder", default=False, action="store_true", help="list text decoder models")
 
     subparser.add_argument("--pretrained", default=False, action="store_true", help="list pretrained models")
     subparser.add_argument("--filter", type=str, help="filter results with a fnmatch type filter)")
@@ -51,8 +52,10 @@ def main(args: argparse.Namespace) -> None:
     task = None
     if args.image_text is True:
         task = Task.IMAGE_TEXT
-    elif args.text is True:
-        task = Task.TEXT
+    elif args.text_encoder is True:
+        task = Task.TEXT_ENCODER
+    elif args.text_decoder is True:
+        task = Task.TEXT_DECODER
 
     if args.pretrained is True:
         model_list = registry.list_pretrained_models(task=task)

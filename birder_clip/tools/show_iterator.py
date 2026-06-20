@@ -11,7 +11,6 @@ import numpy as np
 import torch
 import torchvision.transforms.v2.functional as F
 from birder.common import cli
-from birder.common import training_cli
 from birder.conf import settings
 from birder.data.dataloader.webdataset import make_wds_loader
 from birder.data.datasets.directory import ImageLoaderName
@@ -23,6 +22,7 @@ from birder.data.transforms.classification import reverse_preset
 from birder.data.transforms.classification import training_preset
 from torch.utils.data import DataLoader
 
+from birder_clip.common import training_cli
 from birder_clip.data.datasets.csv import ImageTextCsvDataset
 from birder_clip.data.datasets.webdataset import make_wds_dataset
 from birder_clip.data.datasets.webdataset import prepare_wds_args
@@ -107,17 +107,19 @@ def show_iterator(args: argparse.Namespace) -> None:
     reverse_transform = reverse_preset(rgb_stats)
     if args.mode == "training":
         transform = training_preset(
-            args.size,
-            args.aug_type,
-            args.aug_level,
-            rgb_stats,
-            args.resize_min_scale,
-            args.re_prob,
-            args.use_grayscale,
-            args.ra_num_ops,
-            args.ra_magnitude,
-            args.augmix_severity,
-            args.simple_crop,
+            size=args.size,
+            aug_type=args.aug_type,
+            level=args.aug_level,
+            rgv_values=rgb_stats,
+            resize_min_scale=args.resize_min_scale,
+            re_prob=args.re_prob,
+            use_grayscale=args.use_grayscale,
+            ra_num_ops=args.ra_num_ops,
+            ra_magnitude=args.ra_magnitude,
+            augmix_severity=args.augmix_severity,
+            clip_color_jitter_prob=args.clip_color_jitter_prob,
+            clip_gray_prob=args.clip_gray_prob,
+            simple_crop=args.simple_crop,
         )
     elif args.mode == "inference":
         transform = inference_preset(args.size, rgb_stats, args.center_crop, args.simple_crop)
@@ -182,7 +184,6 @@ def set_parser(subparsers: Any) -> None:
     )
     subparser.add_argument("--size", type=int, nargs="+", default=[224], metavar=("H", "W"), help="image size")
     training_cli.add_data_aug_args(subparser)
-    subparser.add_argument("--center-crop", type=float, default=1.0, help="center crop ratio during inference")
     subparser.add_argument(
         "--batch", default=False, action="store_true", help="show a batch instead of a single sample"
     )

@@ -3,9 +3,38 @@ import unittest
 
 import torch
 
+from birder_clip.tokenizers import get_tokenizer
+from birder_clip.tokenizers import list_tokenizers
+from birder_clip.tokenizers import register_tokenizer
 from birder_clip.tokenizers import simple_tokenizer
+from birder_clip.tokenizers.registry import exists
+from birder_clip.tokenizers.registry import get_tokenizer_info
 
 logging.disable(logging.CRITICAL)
+
+
+class TestTokenizerRegistry(unittest.TestCase):
+    def test_tokenizer_registry(self) -> None:
+        self.assertIn("simple_tokenizer", list_tokenizers())
+        self.assertIn("openai_clip_bpe", list_tokenizers())
+        self.assertTrue(exists("simple_tokenizer"))
+        self.assertFalse(exists("missing_tokenizer"))
+        self.assertIsInstance(get_tokenizer("simple_tokenizer"), simple_tokenizer.SimpleTokenizer)
+
+    def test_duplicate_tokenizer_warning(self) -> None:
+        with self.assertWarns(UserWarning):
+            register_tokenizer(
+                "simple_tokenizer",
+                simple_tokenizer.SimpleTokenizer,
+                context_length=simple_tokenizer.DEFAULT_CONTEXT_LENGTH,
+            )
+
+    def test_tokenizer_info_kwargs_are_copied(self) -> None:
+        _, tokenizer_kwargs = get_tokenizer_info("pe_base_bpe")
+        tokenizer_kwargs["context_length"] = 999
+
+        _, next_tokenizer_kwargs = get_tokenizer_info("pe_base_bpe")
+        self.assertEqual(next_tokenizer_kwargs["context_length"], 32)
 
 
 class TestSimpleTokenizer(unittest.TestCase):

@@ -47,7 +47,7 @@ def set_parser(subparsers: Any) -> None:
             "python -m birder_clip.tools model-info --network openai_clip_vit_l14 --epoch 0\n"
             "python -m birder_clip.tools model-info --network pe_core_l14 --st\n"
             "python -m birder_clip.tools model-info --network clip --image-encoder vit_b16 "
-            "--text-encoder text_transformer --embed-dim 512 --tokenizer openai_clip_bpe\n"
+            "--text-encoder transformer_encoder --embed-dim 512 --tokenizer openai_clip_bpe\n"
         ),
         formatter_class=cli.ArgumentHelpFormatter,
     )

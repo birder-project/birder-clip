@@ -15,38 +15,44 @@ from birder_clip.tokenizers.registry import get_tokenizer_info
 
 if TYPE_CHECKING is True:
     from birder_clip.net.base import BaseNet  # pylint: disable=cyclic-import
-    from birder_clip.net.text.base import TextBaseNet  # pylint: disable=cyclic-import
+    from birder_clip.net.text.base import TextDecoderBaseNet  # pylint: disable=cyclic-import
+    from birder_clip.net.text.base import TextEncoderBaseNet  # pylint: disable=cyclic-import
 
-    NetType: TypeAlias = type[BaseNet] | type[TextBaseNet]
+    BaseNetObjType: TypeAlias = BaseNet | TextEncoderBaseNet | TextDecoderBaseNet
+    BaseNetType: TypeAlias = type[BaseNet] | type[TextEncoderBaseNet] | type[TextDecoderBaseNet]
 
 
 class Task(StrEnum):
     IMAGE_TEXT = "image_text"
-    TEXT = "text"
+    TEXT_ENCODER = "text_encoder"
+    TEXT_DECODER = "text_decoder"
 
 
 class ModelRegistry:
     def __init__(self) -> None:
-        self.registered_configs: dict[str, "NetType"] = {}
+        self.registered_configs: dict[str, "BaseNetType"] = {}
         self._image_text_nets: dict[str, type["BaseNet"]] = {}
-        self._text_nets: dict[str, type[TextBaseNet]] = {}
+        self._text_encoder_nets: dict[str, type[TextEncoderBaseNet]] = {}
+        self._text_decoder_nets: dict[str, type[TextDecoderBaseNet]] = {}
         self._pretrained_nets = manifest.REGISTRY_MANIFEST
 
     @property
-    def all_nets(self) -> dict[str, "NetType"]:
-        return {**self._image_text_nets, **self._text_nets}
+    def all_nets(self) -> dict[str, "BaseNetType"]:
+        return {**self._image_text_nets, **self._text_encoder_nets, **self._text_decoder_nets}
 
-    def _get_models_for_task(self, task: Task) -> dict[str, "NetType"]:
+    def _get_models_for_task(self, task: Task) -> dict[str, "BaseNetType"]:
         if task == Task.IMAGE_TEXT:
-            nets: dict[str, "NetType"] = self._image_text_nets
-        elif task == Task.TEXT:
-            nets = self._text_nets
+            nets: dict[str, "BaseNetType"] = self._image_text_nets
+        elif task == Task.TEXT_ENCODER:
+            nets = self._text_encoder_nets
+        elif task == Task.TEXT_DECODER:
+            nets = self._text_decoder_nets
         else:
             raise ValueError(f"Unsupported model task: {task}")
 
         return nets
 
-    def _register_model(self, name: str, net_type: "NetType") -> None:
+    def _register_model(self, name: str, net_type: "BaseNetType") -> None:
         name_key = name.lower()
         task = Task(net_type.task)
         nets = self._get_models_for_task(task)
@@ -57,7 +63,9 @@ class ModelRegistry:
 
         nets[name_key] = net_type
 
-    def register_model_config(self, name: str, net_type: "NetType", *, config: Optional[dict[str, Any]] = None) -> None:
+    def register_model_config(
+        self, name: str, net_type: "BaseNetType", *, config: Optional[dict[str, Any]] = None
+    ) -> None:
         name_key = name.lower()
         registered_net_type = type(name, (net_type,), {"config": config})
         self._register_model(name_key, registered_net_type)
@@ -180,17 +188,30 @@ class ModelRegistry:
 
         return metadata
 
-    def text_factory(
+    def text_encoder_factory(
         self, name: str, *, config: Optional[dict[str, Any]] = None, context_length: Optional[int] = None
-    ) -> "TextBaseNet":
+    ) -> "TextEncoderBaseNet":
         name_key = name.lower()
-        return self._text_nets[name_key](config=config, context_length=context_length)
+        if name_key in self._text_encoder_nets:
+            return self._text_encoder_nets[name_key](config=config, context_length=context_length)
+
+        if name_key.startswith("hf:"):
+            config = {"source": name[len("hf:") :], **({} if config is None else config)}
+            name_key = "hf_text_encoder"
+
+        return self._text_encoder_nets[name_key](config=config, context_length=context_length)
+
+    def text_decoder_factory(
+        self, name: str, *, config: Optional[dict[str, Any]] = None, context_length: Optional[int] = None
+    ) -> "TextDecoderBaseNet":
+        name_key = name.lower()
+        return self._text_decoder_nets[name_key](config=config, context_length=context_length)
 
     def net_factory(self, name: str, *, config: Optional[dict[str, Any]] = None) -> "BaseNet":
         name_key = name.lower()
         return self._image_text_nets[name_key](config=config)
 
-    def _metadata_type_name(self, model: "BaseNet | TextBaseNet") -> str:
+    def _metadata_type_name(self, model: "BaseNetObjType") -> str:
         cls = model.__class__
         bases = cls.__bases__
         if len(bases) > 1 and bases[0].__name__ == "FSDPModule":
@@ -198,14 +219,14 @@ class ModelRegistry:
 
         return cls.__name__.lower()
 
-    def get_model_base_name(self, model: "BaseNet | TextBaseNet") -> str:
+    def get_model_base_name(self, model: "BaseNetObjType") -> str:
         type_name = self._metadata_type_name(model)
         if type_name in self.registered_configs:
             type_name = self.registered_configs[type_name].__bases__[0].__name__.lower()
 
         return type_name
 
-    def get_registered_name(self, model: "BaseNet | TextBaseNet") -> Optional[str]:
+    def get_registered_name(self, model: "BaseNetObjType") -> Optional[str]:
         type_name = self._metadata_type_name(model)
         if type_name in self.registered_configs:
             return type_name

@@ -1,3 +1,5 @@
+# Base contract for image-text models that combine image and text towers.
+
 import copy
 from typing import Any
 from typing import Optional
@@ -8,7 +10,7 @@ from birder.net.base import BaseNet as ImageEncoder
 from torch import nn
 
 from birder_clip.model_registry import Task
-from birder_clip.net.text.base import TextBaseNet
+from birder_clip.net.text.base import TextEncoderBaseNet
 
 DataShapeType = TypedDict("DataShapeType", {"data_shape": list[int]})
 SignatureType = TypedDict("SignatureType", {"inputs": list[DataShapeType], "outputs": list[DataShapeType]})
@@ -40,9 +42,19 @@ class BaseNet(nn.Module):
             self.config.update(config)  # Override with custom config
 
         self.image_encoder: ImageEncoder
-        self.text_encoder: TextBaseNet
+        self.text_encoder: TextEncoderBaseNet  # CoCa assumes a detector backbone
         self.embedding_size: int
         self.tokenizer_name: str
+
+    def set_grad_checkpointing(
+        self,
+        enable: bool = True,
+        *,
+        segments: Optional[int] = None,
+        preserve_rng_state: bool = True,
+        use_reentrant: bool = False,
+    ) -> None:
+        raise RuntimeError(f"{self.__class__.__name__} does not support gradient checkpointing")
 
     def encode_image(self, image: torch.Tensor, normalize: bool = False) -> torch.Tensor:
         raise NotImplementedError

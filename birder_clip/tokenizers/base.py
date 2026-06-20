@@ -11,6 +11,7 @@ import torch
 class Tokenizer(Protocol):
     context_length: int
     num_special_tokens: int
+    pad_token_id: int
 
     def encode(self, text: str) -> list[int]: ...
 

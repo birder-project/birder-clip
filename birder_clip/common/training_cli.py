@@ -21,6 +21,11 @@ def add_model_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("-n", "--network", type=str, help="the image-text network to train")
     parser.add_argument("-t", "--tag", type=str, help="add model tag")
     parser.add_argument("--image-encoder", type=str, help="the image encoder to use")
+    parser.add_argument(
+        "--image-encoder-pretrained",
+        type=str,
+        help="pretrained Birder image model weights path to load into the image encoder",
+    )
     parser.add_argument("--text-encoder", type=str, help="the text encoder to use")
     parser.add_argument("--embed-dim", type=int, metavar="N", help="shared image-text embedding dimension")
     parser.add_argument("--tokenizer", type=str, help="the tokenizer to use")
@@ -43,7 +48,23 @@ def add_model_args(parser: argparse.ArgumentParser) -> None:
 
 def add_loss_args(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("Loss parameters")
-    group.add_argument("--loss", type=str, choices=["clip"], default="clip", help="loss function to use")
+    group.add_argument("--loss", type=str, choices=["clip", "coca"], default="clip", help="loss function to use")
+    group.add_argument(
+        "--coca-caption-loss-weight", type=float, default=1.0, help="weight assigned to CoCa caption loss"
+    )
+    group.add_argument(
+        "--coca-contrastive-loss-weight", type=float, default=1.0, help="weight assigned to CoCa contrastive loss"
+    )
+
+
+def add_freeze_args(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("Freeze parameters")
+    group.add_argument(
+        "--freeze-image-encoder",
+        default=False,
+        action="store_true",
+        help="freeze image encoder body, leaving the projection head trainable",
+    )
 
 
 def add_optimization_args(parser: argparse.ArgumentParser, default_batch_size: int = 32) -> None:
@@ -66,7 +87,12 @@ def add_optimization_args(parser: argparse.ArgumentParser, default_batch_size: i
         metavar="N",
         help="number of iterations to accumulate gradients per optimizer step",
     )
-    # NOTE: Add flag for negative sample caching in grad accum mode
+    group.add_argument(
+        "--grad-accum-cache-negatives",
+        default=False,
+        action="store_true",
+        help="cache features so CLIP loss uses all accumulated microbatches as negatives",
+    )
 
 
 def add_lr_wd_args(parser: argparse.ArgumentParser) -> None:
@@ -250,6 +276,8 @@ def add_data_aug_args(
     )
     group.add_argument("--ra-magnitude", type=int, default=9, help="magnitude for all the RandAugment transformations")
     group.add_argument("--augmix-severity", type=int, default=3, help="severity of AugMix policy")
+    group.add_argument("--clip-color-jitter-prob", type=float, default=0.0, help="CLIP color jitter probability")
+    group.add_argument("--clip-gray-prob", type=float, default=0.0, help="CLIP grayscale probability")
     group.add_argument("--resize-min-scale", type=float, default=default_min_scale, help="random resize min scale")
     group.add_argument(
         "--re-prob",
@@ -353,6 +381,29 @@ def add_precision_args(parser: argparse.ArgumentParser) -> None:
     )
     group.add_argument(
         "--fast-matmul", default=False, action="store_true", help="use fast matrix multiplication (affects precision)"
+    )
+
+
+def add_grad_checkpointing_args(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("Gradient checkpointing parameters")
+    group.add_argument(
+        "--grad-checkpointing",
+        default=False,
+        action="store_true",
+        help="enable gradient checkpointing for supported models",
+    )
+    group.add_argument(
+        "--grad-checkpointing-segments",
+        type=int,
+        metavar="N",
+        help="number of checkpoint segments to request from supported models",
+    )
+    group.add_argument(
+        "--no-grad-checkpointing-preserve-rng-state",
+        dest="grad_checkpointing_preserve_rng_state",
+        default=True,
+        action="store_false",
+        help="disable RNG state preservation during gradient checkpointing recomputation",
     )
 
 
@@ -578,8 +629,12 @@ def common_args_validation(args: argparse.Namespace) -> None:
         raise cli.ValidationError("--load-states requires --resume-epoch to be set")
     if args.load_scheduler is True and args.resume_epoch is None:
         raise cli.ValidationError("--load-scheduler requires --resume-epoch to be set")
-    if hasattr(args, "pretrained") is True and args.pretrained is True and args.resume_epoch is not None:
+    if args.pretrained is True and args.resume_epoch is not None:
         raise cli.ValidationError("--pretrained cannot be used with --resume-epoch")
+    if args.image_encoder_pretrained is not None and args.resume_epoch is not None:
+        raise cli.ValidationError("--image-encoder-pretrained cannot be used with --resume-epoch")
+    if args.pretrained is True and args.image_encoder_pretrained is not None:
+        raise cli.ValidationError("--image-encoder-pretrained cannot be used with --pretrained")
 
     if args.freeze_bn is True and args.sync_bn is True:
         raise cli.ValidationError("--freeze-bn cannot be used with --sync-bn")
@@ -605,10 +660,29 @@ def common_args_validation(args: argparse.Namespace) -> None:
         raise cli.ValidationError("--context-length must be positive")
     if args.grad_accum_steps < 1:
         raise cli.ValidationError("--grad-accum-steps must be >= 1")
+    if args.grad_accum_cache_negatives is True and args.grad_accum_steps == 1:
+        raise cli.ValidationError("--grad-accum-cache-negatives requires --grad-accum-steps greater than 1")
+    if args.grad_accum_cache_negatives is True and args.loss == "coca":
+        raise cli.ValidationError("--grad-accum-cache-negatives is only supported with --loss clip")
+
+    if args.coca_caption_loss_weight < 0.0:
+        raise cli.ValidationError("--coca-caption-loss-weight must be non-negative")
+    if args.coca_contrastive_loss_weight < 0.0:
+        raise cli.ValidationError("--coca-contrastive-loss-weight must be non-negative")
+
+    # EMA
     if args.model_ema_steps < 1:
         raise cli.ValidationError("--model-ema-steps must be >= 1")
 
+    # Gradient checkpointing args
+    if args.grad_checkpointing_segments is not None and args.grad_checkpointing_segments < 1:
+        raise cli.ValidationError("--grad-checkpointing-segments must be >= 1")
+    if args.grad_checkpointing_segments is not None and args.grad_checkpointing is False:
+        raise cli.ValidationError("--grad-checkpointing-segments requires --grad-checkpointing")
+
     if args.distributed_mode == "fsdp":
+        if args.grad_checkpointing is True:
+            raise cli.ValidationError("--grad-checkpointing cannot be used with --distributed-mode fsdp")
         if args.sync_bn is True:
             raise cli.ValidationError("--sync-bn cannot be used with --distributed-mode fsdp")
         if args.find_unused_parameters is True:

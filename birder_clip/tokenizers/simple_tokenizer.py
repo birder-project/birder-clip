@@ -94,6 +94,7 @@ class SimpleTokenizer:
         self.vocab_size = len(self.encoder)
         self.sot_token_id = self.encoder["<start_of_text>"]
         self.eot_token_id = self.encoder["<end_of_text>"]
+        self.pad_token_id = 0  # NOTE: Not configurable
 
     def _load_merges(self, bpe_path: Optional[str | Path]) -> list[tuple[str, str]]:
         if bpe_path is None:

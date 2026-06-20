@@ -61,4 +61,6 @@ class OpenVisionTokenizer:
         return input_ids
 
 
-register_tokenizer("openvision", OpenVisionTokenizer, source="bert-base-uncased", context_length=80, vocab_size=32000)
+register_tokenizer(
+    "openvision_v1", OpenVisionTokenizer, source="bert-base-uncased", context_length=80, vocab_size=32000
+)

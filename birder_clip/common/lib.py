@@ -43,7 +43,7 @@ def get_image_text_network_name(
     parts = [network]
     if image_encoder is not None:
         parts.append(image_encoder)
-    if text_encoder is not None and text_encoder != "text_transformer":
+    if text_encoder is not None and text_encoder != "transformer_encoder":
         parts.append(text_encoder)
 
     if registry.exists(network) is True:

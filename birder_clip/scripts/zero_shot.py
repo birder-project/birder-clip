@@ -106,6 +106,7 @@ def predict(args: argparse.Namespace) -> None:
         text_encoder_config=args.text_encoder_config,
         epoch=args.epoch,
         new_size=args.size,
+        new_context_length=args.context_length,
         inference=True,
         st=args.st,
         dtype=model_dtype,
@@ -118,7 +119,11 @@ def predict(args: argparse.Namespace) -> None:
     else:
         tokenizer_name = net.tokenizer_name
 
-    context_length = lib.get_context_length_from_signature(model_info.signature)
+    if args.context_length is not None:
+        context_length = args.context_length
+    else:
+        context_length = lib.get_context_length_from_signature(model_info.signature)
+
     tokenizer = get_tokenizer(tokenizer_name, context_length=context_length)
     logger.debug(f"Using tokenizer: {tokenizer_name}, context length={context_length}")
 
@@ -216,6 +221,8 @@ def predict(args: argparse.Namespace) -> None:
     )
     if args.simple_crop is True:
         base_output_path = f"{base_output_path}_sc"
+    if args.tta is True:
+        base_output_path = f"{base_output_path}_tta"
     if args.model_dtype != "float32":
         base_output_path = f"{base_output_path}_{args.model_dtype}"
     if args.prefix is not None:
@@ -253,6 +260,7 @@ def predict(args: argparse.Namespace) -> None:
         net,
         inference_loader,
         text_embeddings,
+        tta=args.tta,
         return_logits=args.save_logits,
         model_dtype=model_dtype,
         amp=args.amp,
@@ -394,6 +402,12 @@ def get_args_parser() -> argparse.ArgumentParser:
         "--size", type=int, nargs="+", metavar=("H", "W"), help="image size for inference (defaults to model signature)"
     )
     parser.add_argument(
+        "--context-length",
+        type=int,
+        metavar="N",
+        help="text context length for inference (defaults to model signature)",
+    )
+    parser.add_argument(
         "--img-loader",
         type=str,
         choices=get_args(ImageLoaderName),
@@ -414,6 +428,7 @@ def get_args_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="use a simple crop that preserves aspect ratio but may trim parts of the image",
     )
+    parser.add_argument("--tta", default=False, action="store_true", help="test time augmentation (image oversampling)")
     parser.add_argument("--show", default=False, action="store_true", help="show image predictions")
     parser.add_argument("--show-top-below", type=float, help="show when top prediction is below given threshold")
     parser.add_argument("--show-target-below", type=float, help="show when target prediction is below given threshold")
@@ -500,6 +515,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise cli.ValidationError(f"--network {args.network} not supported, see list-models tool for available options")
     if args.center_crop > 1 or args.center_crop <= 0.0:
         raise cli.ValidationError(f"--center-crop must be in range of (0, 1.0], got {args.center_crop}")
+    if args.context_length is not None and args.context_length <= 0:
+        raise cli.ValidationError("--context-length must be positive")
 
     reserved_model_config_keys = lib.get_reserved_model_config_keys(args.model_config)
     if len(reserved_model_config_keys) > 0:
@@ -509,7 +526,7 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.image_encoder_config is not None and "size" in args.image_encoder_config:
         raise cli.ValidationError("--image-encoder-config cannot contain size, use --size")
     if args.text_encoder_config is not None and "context_length" in args.text_encoder_config:
-        raise cli.ValidationError("--text-encoder-config cannot contain context_length")
+        raise cli.ValidationError("--text-encoder-config cannot contain context_length, use --context-length")
 
     if args.compile_mode is not None and args.compile is False:
         raise cli.ValidationError("--compile-mode requires --compile")

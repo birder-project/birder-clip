@@ -11,7 +11,7 @@ from torch import nn
 
 from birder_clip.model_registry import registry
 from birder_clip.net.base import BaseNet
-from birder_clip.net.text.base import TextBaseNet
+from birder_clip.net.text.base import TextEncoderBaseNet
 
 
 class CLIP(BaseNet):
@@ -31,12 +31,12 @@ class CLIP(BaseNet):
             config=image_config.get("config", None),
             size=image_config.get("size", None),
         )
-        text_encoder = registry.text_factory(
+        text_encoder = registry.text_encoder_factory(
             text_config["network"],
             config=text_config.get("config", None),
             context_length=text_config.get("context_length", None),
         )
-        assert isinstance(text_encoder, TextBaseNet)
+        assert isinstance(text_encoder, TextEncoderBaseNet)
         assert text_encoder.embedding_size == embed_dim
 
         self.image_encoder = image_encoder
@@ -49,6 +49,27 @@ class CLIP(BaseNet):
 
         self.embedding_size = embed_dim
         self.tokenizer_name = tokenizer_name
+
+    def set_grad_checkpointing(
+        self,
+        enable: bool = True,
+        *,
+        segments: Optional[int] = None,
+        preserve_rng_state: bool = True,
+        use_reentrant: bool = False,
+    ) -> None:
+        self.image_encoder.set_grad_checkpointing(
+            enable=enable,
+            segments=segments,
+            preserve_rng_state=preserve_rng_state,
+            use_reentrant=use_reentrant,
+        )
+        self.text_encoder.set_grad_checkpointing(
+            enable=enable,
+            segments=segments,
+            preserve_rng_state=preserve_rng_state,
+            use_reentrant=use_reentrant,
+        )
 
     def encode_image(self, image: torch.Tensor, normalize: bool = False) -> torch.Tensor:
         features = self.image_encoder(image)
@@ -99,7 +120,7 @@ registry.register_model_config(
             "size": (224, 224),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "hidden_dim": 768,
                 "num_heads": 12,
@@ -122,7 +143,7 @@ registry.register_model_config(
             "size": (224, 224),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "hidden_dim": 768,
                 "num_heads": 12,
@@ -144,7 +165,7 @@ registry.register_model_config(
             "size": (224, 224),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "hidden_dim": 1024,
                 "num_heads": 16,
@@ -168,7 +189,7 @@ registry.register_model_config(
             "size": (320, 320),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "hidden_dim": 640,
                 "num_heads": 10,
@@ -180,7 +201,31 @@ registry.register_model_config(
     },
 )
 
-# OpenVision - https://arxiv.org/abs/2505.04601
+# OpenVision v1 - https://arxiv.org/abs/2505.04601
+registry.register_model_config(
+    "openvision_v1_vit_s16",
+    CLIP,
+    config={
+        "image": {
+            "network": "vit_reg1_s16_nap_avg",
+            "config": {"drop_path_rate": 0.0},
+            "size": (224, 224),
+        },
+        "text": {
+            "network": "transformer_encoder_small",
+            "config": {
+                "vocab_size": 32000,
+                "causal_mask": False,
+                "pool_type": "last",
+                "norm_layer_eps": 1e-6,
+                "act_layer_type": "gelu_tanh",
+            },
+            "context_length": 80,
+        },
+        "embed_dim": 384,
+        "tokenizer": "openvision_v1",
+    },
+)
 registry.register_model_config(
     "openvision_v1_vit_b16",
     CLIP,
@@ -191,7 +236,7 @@ registry.register_model_config(
             "size": (384, 384),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "vocab_size": 32000,
                 "causal_mask": False,
@@ -202,7 +247,7 @@ registry.register_model_config(
             "context_length": 80,
         },
         "embed_dim": 512,
-        "tokenizer": "openvision",
+        "tokenizer": "openvision_v1",
     },
 )
 registry.register_model_config(
@@ -215,7 +260,7 @@ registry.register_model_config(
             "size": (224, 224),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "vocab_size": 32000,
                 "hidden_dim": 768,
@@ -229,7 +274,7 @@ registry.register_model_config(
             "context_length": 80,
         },
         "embed_dim": 768,
-        "tokenizer": "openvision",
+        "tokenizer": "openvision_v1",
     },
 )
 
@@ -243,7 +288,7 @@ registry.register_model_config(
             "size": (384, 384),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "context_length": 32,
         },
         "embed_dim": 512,
@@ -259,7 +304,7 @@ registry.register_model_config(
             "size": (224, 224),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "hidden_dim": 1024,
                 "num_heads": 16,
@@ -281,7 +326,7 @@ registry.register_model_config(
             "size": (336, 336),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "hidden_dim": 1024,
                 "num_heads": 16,
@@ -301,12 +346,12 @@ registry.register_model_config(
     CLIP,
     config={
         "image": {
-            "network": "vit_b16_ap",  # NOTE: Change to vit_b16_ap_c1 when next version of Birder released
+            "network": "vit_b16_ap_c1",
             "num_classes": 0,
             "size": (384, 384),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "vocab_size": 32000,
                 "hidden_dim": 768,
@@ -337,7 +382,7 @@ registry.register_model_config(
             "size": (256, 256),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "vocab_size": 256000,
                 "hidden_dim": 1024,
@@ -367,7 +412,7 @@ registry.register_model_config(
             "size": (224, 224),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "vocab_size": 256000,
                 "hidden_dim": 1152,
@@ -399,7 +444,7 @@ registry.register_model_config(
             "size": (256, 256),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "causal_mask": False,
             },
@@ -417,7 +462,7 @@ registry.register_model_config(
             "size": (256, 256),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "causal_mask": False,
             },
@@ -435,7 +480,7 @@ registry.register_model_config(
             "size": (256, 256),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "hidden_dim": 768,
                 "num_heads": 12,
@@ -456,7 +501,7 @@ registry.register_model_config(
             "size": (256, 256),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "hidden_dim": 768,
                 "num_heads": 12,
@@ -466,6 +511,70 @@ registry.register_model_config(
         },
         "embed_dim": 768,
         "tokenizer": "openai_clip_bpe",
+    },
+)
+
+# DFN - https://arxiv.org/abs/2309.17425
+registry.register_model_config(
+    "dfn2b_clip_vit_b16",
+    CLIP,
+    config={
+        "image": {
+            "network": "vit_b16_pn_quick_gelu",
+            "config": {"drop_path_rate": 0.0},
+            "size": (224, 224),
+        },
+        "text": {
+            "network": "transformer_encoder",
+            "config": {
+                "act_layer_type": "quick_gelu",
+            },
+        },
+        "embed_dim": 512,
+        "tokenizer": "openai_clip_bpe",
+    },
+)
+registry.register_model_config(
+    "dfn2b_clip_vit_l14",
+    CLIP,
+    config={
+        "image": {
+            "network": "vit_l14_pn_quick_gelu",
+            "config": {"drop_path_rate": 0.0},
+            "size": (224, 224),
+        },
+        "text": {
+            "network": "transformer_encoder",
+            "config": {
+                "hidden_dim": 768,
+                "num_heads": 12,
+                "output_dim": 768,
+                "act_layer_type": "quick_gelu",
+            },
+        },
+        "embed_dim": 768,
+        "tokenizer": "openai_clip_bpe",
+    },
+)
+
+# MetaCLIP - https://arxiv.org/abs/2309.16671
+registry.register_model_config(
+    "metaclip_v1_fullcc25b_b16",
+    CLIP,
+    config={
+        "image": {
+            "network": "vit_b16_pn_quick_gelu",
+            "config": {"drop_path_rate": 0.0},
+            "size": (224, 224),
+        },
+        "text": {
+            "network": "transformer_encoder",
+            "config": {
+                "act_layer_type": "quick_gelu",
+            },
+        },
+        "embed_dim": 512,
+        "tokenizer": "metaclip_v1_bpe",
     },
 )
 
@@ -479,7 +588,7 @@ registry.register_model_config(
             "size": (384, 384),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "vocab_size": 901629,
                 "eos_token_id": 2,
@@ -498,7 +607,7 @@ registry.register_model_config(
             "size": (224, 224),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "vocab_size": 901629,
                 "hidden_dim": 768,
@@ -522,7 +631,7 @@ registry.register_model_config(
             "size": (224, 224),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
         },
         "embed_dim": 512,
         "tokenizer": "openai_clip_bpe",
@@ -539,7 +648,7 @@ registry.register_model_config(
             "size": (224, 224),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "hidden_dim": 768,
                 "num_heads": 12,
@@ -561,7 +670,7 @@ registry.register_model_config(
             "size": (224, 224),
         },
         "text": {
-            "network": "text_transformer",
+            "network": "transformer_encoder",
             "config": {
                 "hidden_dim": 1024,
                 "num_heads": 16,

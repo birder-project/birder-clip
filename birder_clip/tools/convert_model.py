@@ -75,7 +75,7 @@ def set_parser(subparsers: Any) -> None:
             "python -m birder_clip.tools convert-model --network laion_clip_vit_h14 --config\n"
             "python -m birder_clip.tools convert-model --network laion_clip_convnext_v1_base --image-encoder-only\n"
             "python -m birder_clip.tools convert-model --network clip --image-encoder vit_b16 "
-            "--text-encoder text_transformer --embed-dim 512 --tokenizer openai_clip_bpe "
+            "--text-encoder transformer_encoder --embed-dim 512 --tokenizer openai_clip_bpe "
             "--epoch 100 --resize 384\n"
         ),
         formatter_class=cli.ArgumentHelpFormatter,

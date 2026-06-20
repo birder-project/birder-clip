@@ -1,11 +1,13 @@
 """
-CLIP text transformer, adapted from
+Text transformer encoder, adapted from
 https://github.com/mlfoundations/open_clip/blob/main/src/open_clip/transformer.py
 """
 
 # Reference license: MIT
 
+import logging
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 from typing import Literal
 from typing import Optional
@@ -16,13 +18,17 @@ from birder.layers import FFN
 from birder.layers import LayerScale
 from birder.layers.activations import get_activation_module
 from torch import nn
+from torch.utils.checkpoint import checkpoint_sequential
 from torchvision.ops import StochasticDepth
 
 from birder_clip.model_registry import registry
-from birder_clip.net.text.base import TextBaseNet
+from birder_clip.net.text.base import TextEncoderBaseNet
+from birder_clip.net.text.base import adjust_position_embedding
+
+logger = logging.getLogger(__name__)
 
 
-def text_global_pool(
+def _global_pool(
     x: torch.Tensor,
     text: torch.Tensor,
     *,
@@ -164,6 +170,11 @@ class Encoder(nn.Module):
         norm_layer_eps: float = 1e-5,
     ) -> None:
         super().__init__()
+        self.grad_checkpointing = False
+        self.grad_checkpointing_segments: Optional[int] = None
+        self.grad_checkpointing_preserve_rng_state = True
+        self.grad_checkpointing_use_reentrant = False
+
         pre_layers = []
         if dropout > 0.0:
             pre_layers.append(nn.Dropout(dropout))
@@ -191,8 +202,44 @@ class Encoder(nn.Module):
             ]
         )
 
+    def set_grad_checkpointing(
+        self,
+        enable: bool = True,
+        *,
+        segments: Optional[int] = None,
+        preserve_rng_state: bool = True,
+        use_reentrant: bool = False,
+    ) -> None:
+        if enable is True:
+            logger.debug(
+                f"Enabling gradient checkpointing: segments={segments}, "
+                f"preserve_rng_state={preserve_rng_state}, use_reentrant={use_reentrant}"
+            )
+        else:
+            logger.debug("Disabling gradient checkpointing")
+
+        self.grad_checkpointing = enable
+        self.grad_checkpointing_segments = segments
+        self.grad_checkpointing_preserve_rng_state = preserve_rng_state
+        self.grad_checkpointing_use_reentrant = use_reentrant
+
     def forward(self, x: torch.Tensor, attn_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         x = self.pre_block(x)
+        if self.grad_checkpointing is True and torch.is_grad_enabled() is True and not torch.jit.is_scripting():
+            if self.grad_checkpointing_segments is None:
+                segments = len(self.block)
+            else:
+                segments = min(self.grad_checkpointing_segments, len(self.block))
+
+            blocks = tuple(partial(block, attn_mask=attn_mask) for block in self.block)
+            return checkpoint_sequential(
+                blocks,
+                segments,
+                x,
+                use_reentrant=self.grad_checkpointing_use_reentrant,
+                preserve_rng_state=self.grad_checkpointing_preserve_rng_state,
+            )
+
         for b in self.block:
             x = b(x, attn_mask=attn_mask)
 
@@ -203,7 +250,7 @@ class Encoder(nn.Module):
             b.set_causal_attention(is_causal)
 
 
-class TextTransformer(TextBaseNet):
+class TransformerEncoder(TextEncoderBaseNet):
     block_group_regex = r"encoder\.block\.(\d+)"
 
     def __init__(self, *, config: Optional[dict[str, Any]] = None, context_length: Optional[int] = None) -> None:
@@ -220,6 +267,10 @@ class TextTransformer(TextBaseNet):
         attention_dropout: float = self.config.get("attention_dropout", 0.0)
         drop_path_rate: float = self.config.get("drop_path_rate", 0.0)
         causal_mask: bool = self.config.get("causal_mask", True)
+        class_token: bool = self.config.get("class_token", False)
+        pos_embed_special_tokens: bool = self.config.get("pos_embed_special_tokens", True)
+        post_norm: bool = self.config.get("post_norm", True)
+        norm_after_pool: bool = self.config.get("norm_after_pool", False)
         pool_type: Literal["first", "last", "eos"] = self.config.get("pool_type", "eos")
         proj_bias: bool = self.config.get("proj_bias", False)
         pad_token_id: Optional[int] = self.config.get("pad_token_id", None)
@@ -246,15 +297,26 @@ class TextTransformer(TextBaseNet):
 
         self.vocab_size = vocab_size
         self.hidden_dim = hidden_dim
-        self.output_dim = output_dim
         self.num_heads = num_heads
         self.num_layers = num_layers
         self.causal_mask = causal_mask
+        self.pos_embed_special_tokens = pos_embed_special_tokens
         self.pool_type = pool_type
         self.pad_token_id = pad_token_id
         self.eos_token_id = eos_token_id
         self.token_embedding = nn.Embedding(vocab_size, hidden_dim)
-        self.pos_embedding = nn.Parameter(torch.empty(1, self.context_length, hidden_dim).normal_(std=0.01))
+        self.num_special_tokens = 0
+        if class_token is True:
+            self.class_token = nn.Parameter(torch.empty(1, 1, hidden_dim))
+            self.num_special_tokens += 1
+        else:
+            self.class_token = None
+
+        seq_length = self.context_length
+        if pos_embed_special_tokens is True:
+            seq_length += self.num_special_tokens
+
+        self.pos_embedding = nn.Parameter(torch.empty(1, seq_length, hidden_dim).normal_(std=0.01))
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, num_layers)]
         self.encoder = Encoder(
@@ -276,13 +338,24 @@ class TextTransformer(TextBaseNet):
         if causal_mask is True:
             self.encoder.set_causal_attention()
 
-        self.norm = norm_layer(hidden_dim, eps=norm_layer_eps)
+        if post_norm is True and norm_after_pool is False:
+            self.norm = norm_layer(hidden_dim, eps=norm_layer_eps)
+        else:
+            self.norm = nn.Identity()
+
+        if post_norm is True and norm_after_pool is True:
+            self.embedding_norm = norm_layer(hidden_dim, eps=norm_layer_eps)
+        else:
+            self.embedding_norm = nn.Identity()
+
         self.text_projection = nn.Linear(hidden_dim, output_dim, bias=proj_bias)
         self.embedding_size = output_dim
 
         # Weights initialization
         nn.init.normal_(self.token_embedding.weight, std=0.02)
         nn.init.normal_(self.pos_embedding, std=0.01)
+        if self.class_token is not None:
+            nn.init.normal_(self.class_token, std=0.01)
 
         proj_std = (self.hidden_dim**-0.5) * ((2 * self.num_layers) ** -0.5)
         attn_std = self.hidden_dim**-0.5
@@ -297,6 +370,21 @@ class TextTransformer(TextBaseNet):
         if self.text_projection.bias is not None:
             nn.init.zeros_(self.text_projection.bias)
 
+    def set_grad_checkpointing(
+        self,
+        enable: bool = True,
+        *,
+        segments: Optional[int] = None,
+        preserve_rng_state: bool = True,
+        use_reentrant: bool = False,
+    ) -> None:
+        self.encoder.set_grad_checkpointing(
+            enable=enable,
+            segments=segments,
+            preserve_rng_state=preserve_rng_state,
+            use_reentrant=use_reentrant,
+        )
+
     def set_causal_attention(self, is_causal: bool = True) -> None:
         self.causal_mask = is_causal
         self.encoder.set_causal_attention(is_causal)
@@ -305,22 +393,41 @@ class TextTransformer(TextBaseNet):
         if self.causal_mask is True or self.pad_token_id is None:
             return None
 
-        return token_ids.ne(self.pad_token_id)[:, None, None, :]
+        mask = token_ids.ne(self.pad_token_id)
+        if self.class_token is not None:
+            class_token_mask = mask.new_ones(mask.size(0), 1)
+            mask = torch.concat([mask, class_token_mask], dim=1)
+
+        return mask[:, None, None, :]
 
     def forward_features(self, x: torch.Tensor) -> torch.Tensor:
         attn_mask = self._pad_attention_mask(x)
         x = self.token_embedding(x)
-        x = x + self.pos_embedding[:, : x.size(1), :].to(dtype=x.dtype)
+        if self.pos_embed_special_tokens is False:
+            x = x + self.pos_embedding[:, : x.size(1), :].to(dtype=x.dtype)
+
+        if self.class_token is not None:
+            x = torch.concat([x, self.class_token.expand(x.size(0), -1, -1)], dim=1)
+
+        if self.pos_embed_special_tokens is True:
+            x = x + self.pos_embedding[:, : x.size(1), :].to(dtype=x.dtype)
+
         x = self.encoder(x, attn_mask=attn_mask)
         x = self.norm(x)
 
         return x
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        tokens = self.forward_features(x)
-        out = text_global_pool(tokens, x, pool_type=self.pool_type, eos_token_id=self.eos_token_id)
+    def forward_head(self, features: torch.Tensor, text: torch.Tensor) -> torch.Tensor:
+        out = _global_pool(features, text, pool_type=self.pool_type, eos_token_id=self.eos_token_id)
+        out = self.embedding_norm(out)
 
         return self.text_projection(out)
+
+    def tokens_from_features(self, features: torch.Tensor) -> torch.Tensor:
+        if self.class_token is not None:
+            return features[:, :-1]
+
+        return features
 
     def adjust_context_length(self, new_context_length: int) -> None:
         if new_context_length == self.context_length:
@@ -329,14 +436,21 @@ class TextTransformer(TextBaseNet):
         super().adjust_context_length(new_context_length)
 
         with torch.no_grad():
-            orig_dtype = self.pos_embedding.dtype
-            pos_embedding = self.pos_embedding.float()
-            pos_embedding = pos_embedding.permute(0, 2, 1)
-            pos_embedding = F.interpolate(pos_embedding, size=new_context_length, mode="linear", align_corners=True)
-            pos_embedding = pos_embedding.permute(0, 2, 1)
-            pos_embedding = pos_embedding.to(orig_dtype)
+            if self.pos_embed_special_tokens is True and self.num_special_tokens > 0:
+                special_pos_embedding = self.pos_embedding[:, -self.num_special_tokens :, :]
+                pos_embedding = adjust_position_embedding(
+                    self.pos_embedding[:, : -self.num_special_tokens, :], new_context_length
+                )
+                pos_embedding = torch.concat([pos_embedding, special_pos_embedding], dim=1)
+            else:
+                pos_embedding = adjust_position_embedding(self.pos_embedding, new_context_length)
 
         self.pos_embedding = nn.Parameter(pos_embedding)
 
 
-registry.register_model_config("text_transformer", TextTransformer, config={})
+registry.register_model_config("transformer_encoder", TransformerEncoder, config={})
+registry.register_model_config(
+    "transformer_encoder_small",
+    TransformerEncoder,
+    config={"hidden_dim": 384, "num_heads": 6, "output_dim": 384},
+)

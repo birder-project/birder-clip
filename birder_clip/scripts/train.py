@@ -1,3 +1,24 @@
+"""
+Image-text training, adapted from
+https://github.com/mlfoundations/open_clip/blob/main/src/open_clip_train/main.py
+and
+https://github.com/google-research/big_vision/blob/main/big_vision/trainers/proj/image_text/_deprecated_contrastive.py
+
+Paper "Learning Transferable Visual Models From Natural Language Supervision",
+https://arxiv.org/abs/2103.00020
+and
+Paper "LiT: Zero-Shot Transfer with Locked-image text Tuning",
+https://arxiv.org/abs/2111.07991
+
+When --grad-accum-cache-negatives is used with --grad-accum-steps > 1,
+microbatch features are first cached without gradients.
+At each accumulation boundary the microbatches are replayed with gradients one at a time,
+replacing the current microbatch's cached features with fresh features and using the
+remaining cached features as additional CLIP negatives.
+"""
+
+# Reference license: MIT and Apache-2.0
+
 import argparse
 import json
 import logging
@@ -14,6 +35,7 @@ import numpy as np
 import torch
 import torchinfo
 from birder.common import cli
+from birder.common import fs_ops as birder_fs_ops
 from birder.common import fsdp_utils
 from birder.common import training_utils
 from birder.common.lib import format_duration
@@ -38,7 +60,10 @@ from birder_clip.data.datasets.fake import FakeImageTextData
 from birder_clip.data.datasets.webdataset import make_wds_dataset
 from birder_clip.data.datasets.webdataset import prepare_wds_args
 from birder_clip.loss import CLIPLoss
+from birder_clip.loss import CoCaLoss
 from birder_clip.model_registry import registry
+from birder_clip.net import CLIP
+from birder_clip.net import CoCa
 from birder_clip.net.base import get_image_text_signature
 from birder_clip.tokenizers import get_tokenizer
 
@@ -71,13 +96,18 @@ def _encoder_fsdp_wrap_modules(
     return matched_modules
 
 
-def _clip_fsdp_wrap_modules(net: torch.nn.Module, args: argparse.Namespace) -> list[torch.nn.Module]:
+def _image_text_fsdp_wrap_modules(net: torch.nn.Module, args: argparse.Namespace) -> list[torch.nn.Module]:
     image_wrap_modules = _encoder_fsdp_wrap_modules(net.image_encoder, args, encoder_name="image_encoder")
     text_wrap_modules = _encoder_fsdp_wrap_modules(net.text_encoder, args, encoder_name="text_encoder")
-    wrap_modules = [*image_wrap_modules, *text_wrap_modules]
+    decoder_wrap_modules = []
+    if hasattr(net, "text_decoder") is True:
+        decoder_wrap_modules = _encoder_fsdp_wrap_modules(net.text_decoder, args, encoder_name="text_decoder")
+
+    wrap_modules = [*image_wrap_modules, *text_wrap_modules, *decoder_wrap_modules]
     logger.info(
         f"FSDP wrap modules resolved: {len(wrap_modules)} "
-        f"(image_encoder={len(image_wrap_modules)}, text_encoder={len(text_wrap_modules)})"
+        f"(image_encoder={len(image_wrap_modules)}, text_encoder={len(text_wrap_modules)}, "
+        f"text_decoder={len(decoder_wrap_modules)})"
     )
 
     return wrap_modules
@@ -102,17 +132,19 @@ def train(args: argparse.Namespace) -> None:
     logger.debug(f"Using RGB stats: {rgb_stats}")
 
     training_transform = training_preset(
-        args.size,
-        args.aug_type,
-        args.aug_level,
-        rgb_stats,
-        args.resize_min_scale,
-        args.re_prob,
-        args.use_grayscale,
-        args.ra_num_ops,
-        args.ra_magnitude,
-        args.augmix_severity,
-        args.simple_crop,
+        size=args.size,
+        aug_type=args.aug_type,
+        level=args.aug_level,
+        rgv_values=rgb_stats,
+        resize_min_scale=args.resize_min_scale,
+        re_prob=args.re_prob,
+        use_grayscale=args.use_grayscale,
+        ra_num_ops=args.ra_num_ops,
+        ra_magnitude=args.ra_magnitude,
+        augmix_severity=args.augmix_severity,
+        clip_color_jitter_prob=args.clip_color_jitter_prob,
+        clip_gray_prob=args.clip_gray_prob,
+        simple_crop=args.simple_crop,
     )
     val_transform = inference_preset(args.size, rgb_stats, args.center_crop, args.simple_crop)
 
@@ -196,8 +228,9 @@ def train(args: argparse.Namespace) -> None:
 
     batch_size: int = args.batch_size
     grad_accum_steps: int = args.grad_accum_steps
+    grad_accum_cache_negatives: bool = args.grad_accum_cache_negatives
     model_ema_steps: int = args.model_ema_steps
-    logger.debug(f"Effective batch size = {batch_size * grad_accum_steps * args.world_size}")
+    logger.info(f"Effective batch size = {batch_size * grad_accum_steps * args.world_size}")
 
     # Data loaders and samplers
     virtual_epoch_mode = args.steps_per_epoch is not None
@@ -365,8 +398,35 @@ def train(args: argparse.Namespace) -> None:
     else:
         net = registry.net_factory(args.network, config=model_config)
         training_states = fs_ops.TrainingStates.empty()
+        if args.image_encoder_pretrained is not None:
+            pretrained_image_encoder, pretrained_image_info = birder_fs_ops.load_model(
+                device,
+                args.image_encoder,
+                path=args.image_encoder_pretrained,
+                config=args.image_encoder_config,
+                new_size=args.size,
+                inference=False,
+            )
+
+            if pretrained_image_info.rgb_stats != rgb_stats:
+                logger.warning(
+                    f"Training with RGB stats {rgb_stats}, "
+                    f"but pretrained image encoder checkpoint was saved with {pretrained_image_info.rgb_stats}"
+                )
+
+            pretrained_image_encoder.reset_classifier(net.embedding_size)
+            net.image_encoder = pretrained_image_encoder
+
+    if args.loss == "clip":
+        assert isinstance(net, CLIP)
+    elif args.loss == "coca":
+        assert isinstance(net, CoCa)
 
     net.to(device, dtype=model_dtype)
+    if args.freeze_image_encoder is True:
+        net.image_encoder.freeze(freeze_classifier=False)
+        net.image_encoder.eval()
+
     if args.freeze_bn is True:
         net = training_utils.freeze_batchnorm2d(net)
     elif args.sync_bn is True and args.distributed is True:
@@ -375,8 +435,14 @@ def train(args: argparse.Namespace) -> None:
     if args.fast_matmul is True or args.amp is True:
         torch.set_float32_matmul_precision("high")
 
+    if args.grad_checkpointing is True:
+        net.set_grad_checkpointing(
+            segments=args.grad_checkpointing_segments,
+            preserve_rng_state=args.grad_checkpointing_preserve_rng_state,
+        )
+
     if fsdp_mode is True:
-        fsdp_wrap_modules = _clip_fsdp_wrap_modules(net, args)
+        fsdp_wrap_modules = _image_text_fsdp_wrap_modules(net, args)
         net = fsdp_utils.setup_fsdp(net, args, wrap_modules=fsdp_wrap_modules)
         register_fsdp_forward_method(net, "encode_image")
         register_fsdp_forward_method(net, "encode_text")
@@ -392,6 +458,12 @@ def train(args: argparse.Namespace) -> None:
     # Loss criteria
     if args.loss == "clip":
         criterion = CLIPLoss()
+    elif args.loss == "coca":
+        criterion = CoCaLoss(
+            caption_loss_weight=args.coca_caption_loss_weight,
+            clip_loss_weight=args.coca_contrastive_loss_weight,
+            pad_token_id=tokenizer.pad_token_id,
+        )
     else:
         raise ValueError("Unsupported loss")
 
@@ -505,7 +577,7 @@ def train(args: argparse.Namespace) -> None:
             else:
                 model_ema.module.load_state_dict(training_states.ema_model_state)
 
-            model_ema.n_averaged += 1  # pylint:disable=no-member
+            model_ema.n_averaged += 1
 
         model_to_save = model_ema.module
         eval_model = model_ema
@@ -575,11 +647,16 @@ def train(args: argparse.Namespace) -> None:
     running_loss = training_utils.SmoothedValue(window_size=64)
     running_val_loss = training_utils.SmoothedValue()
 
+    if grad_accum_cache_negatives is True:
+        logger.info("Using cached negatives for gradient accumulation")
+
     logger.info(f"Starting training with learning rate of {last_lr}")
     epoch = begin_epoch - 1
     for epoch in range(begin_epoch, args.stop_epoch):
         tic = time.time()
         net.train()
+        if args.freeze_image_encoder is True:
+            training_utils.unwrap_compiled_module(net_without_ddp).image_encoder.eval()
 
         # Clear metrics
         running_loss.clear()
@@ -609,39 +686,120 @@ def train(args: argparse.Namespace) -> None:
         else:
             batch_iter = enumerate(training_loader)
 
+        accum_batches: list[tuple[torch.Tensor, torch.Tensor]] = []
+        accum_features: dict[str, list[torch.Tensor]] = {"image_features": [], "text_features": []}
         for i, (_, images, texts) in batch_iter:
             images = images.to(device, dtype=model_dtype, non_blocking=True)
             texts = texts.to(device, non_blocking=True)
 
             optimizer_update = (i == last_batch_idx) or ((i + 1) % grad_accum_steps == 0)
-            sync_context = no_sync_cm if optimizer_update is False else nullcontext
             if i >= last_accum_start_idx:
                 effective_accum_steps = last_accum_steps
             else:
                 effective_accum_steps = grad_accum_steps
 
-            if fsdp_mode is True and grad_accum_steps > 1:
-                net.set_requires_gradient_sync(requires_gradient_sync=optimizer_update)
-            if fsdp_mode is True and args.no_broadcast_buffers is False:
-                fsdp_utils.broadcast_module_buffers(net)
+            if grad_accum_cache_negatives is True:
+                if fsdp_mode is True and args.no_broadcast_buffers is False:
+                    fsdp_utils.broadcast_module_buffers(net)
 
-            # Forward and backward
-            with sync_context():
-                with torch.amp.autocast("cuda", enabled=args.amp, dtype=amp_dtype):
-                    model_out = net(images, texts, return_features=True)
-                    losses = criterion(
-                        image_features=model_out["image_features"],
-                        text_features=model_out["text_features"],
-                        logit_scale=model_out["logit_scale"],
-                        logit_bias=model_out["logit_bias"],
-                    )
-                    raw_loss = sum(losses.values())
+                with torch.no_grad():
+                    with torch.amp.autocast("cuda", enabled=args.amp, dtype=amp_dtype):
+                        model_out = net(images, texts, return_features=True)
+                        accum_features["image_features"].append(model_out["image_features"])
+                        accum_features["text_features"].append(model_out["text_features"])
 
-                loss = raw_loss / effective_accum_steps
-                if scaler is not None:
-                    scaler.scale(loss).backward()
-                else:
-                    loss.backward()
+                accum_batches.append((images, texts))
+                if optimizer_update is False:
+                    progress.update(n=batch_size * args.world_size)
+                    continue
+
+                optimizer.zero_grad()
+                replay_losses: list[torch.Tensor] = []
+                for j, (accum_images, accum_texts) in enumerate(accum_batches):
+                    replay_requires_gradient_sync = j == len(accum_batches) - 1
+                    sync_context = no_sync_cm if replay_requires_gradient_sync is False else nullcontext
+                    if fsdp_mode is True:
+                        net.set_requires_gradient_sync(requires_gradient_sync=replay_requires_gradient_sync)
+                    if fsdp_mode is True and args.no_broadcast_buffers is False:
+                        fsdp_utils.broadcast_module_buffers(net)
+
+                    with sync_context():
+                        with torch.amp.autocast("cuda", enabled=args.amp, dtype=amp_dtype):
+                            model_out = net(accum_images, accum_texts, return_features=True)
+                            image_features = torch.concat(
+                                accum_features["image_features"][:j]
+                                + [model_out["image_features"]]
+                                + accum_features["image_features"][j + 1 :]
+                            )
+                            text_features = torch.concat(
+                                accum_features["text_features"][:j]
+                                + [model_out["text_features"]]
+                                + accum_features["text_features"][j + 1 :]
+                            )
+                            logit_scale = model_out["logit_scale"]
+                            logit_bias = model_out["logit_bias"]
+
+                            # The towers receive gradients on every replay, scalar loss parameters only once.
+                            if replay_requires_gradient_sync is False:
+                                logit_scale = logit_scale.detach()
+                                if logit_bias is not None:
+                                    logit_bias = logit_bias.detach()
+
+                            losses = criterion(
+                                image_features=image_features,
+                                text_features=text_features,
+                                logit_scale=logit_scale,
+                                logit_bias=logit_bias,
+                            )
+                            replay_raw_loss = sum(losses.values())
+
+                        replay_losses.append(replay_raw_loss.detach())
+                        if scaler is not None:
+                            scaler.scale(replay_raw_loss).backward()
+                        else:
+                            replay_raw_loss.backward()
+
+                accum_batches.clear()
+                for features in accum_features.values():
+                    features.clear()
+
+                raw_loss = torch.stack(replay_losses).mean()
+
+            else:
+                sync_context = no_sync_cm if optimizer_update is False else nullcontext
+                if fsdp_mode is True and grad_accum_steps > 1:
+                    net.set_requires_gradient_sync(requires_gradient_sync=optimizer_update)
+                if fsdp_mode is True and args.no_broadcast_buffers is False:
+                    fsdp_utils.broadcast_module_buffers(net)
+
+                # Forward and backward
+                with sync_context():
+                    with torch.amp.autocast("cuda", enabled=args.amp, dtype=amp_dtype):
+                        model_out = net(images, texts, return_features=True)
+                        if args.loss == "coca":
+                            losses = criterion(
+                                image_features=model_out["image_features"],
+                                text_features=model_out["text_features"],
+                                logits=model_out["logits"],
+                                texts=texts,
+                                logit_scale=model_out["logit_scale"],
+                                logit_bias=model_out["logit_bias"],
+                            )
+                        else:
+                            losses = criterion(
+                                image_features=model_out["image_features"],
+                                text_features=model_out["text_features"],
+                                logit_scale=model_out["logit_scale"],
+                                logit_bias=model_out["logit_bias"],
+                            )
+
+                        raw_loss = sum(losses.values())
+
+                    loss = raw_loss / effective_accum_steps
+                    if scaler is not None:
+                        scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
 
             if optimizer_update is True:
                 if scaler is not None:
@@ -674,13 +832,13 @@ def train(args: argparse.Namespace) -> None:
                 model_ema.update_parameters(net)
                 if ema_warmup_steps > 0 and optimizer_step <= ema_warmup_steps:
                     # Reset ema buffer to keep copying weights during warmup period
-                    model_ema.n_averaged.fill_(0)  # pylint: disable=no-member
+                    model_ema.n_averaged.fill_(0)
 
             # Statistics
             running_loss.update(raw_loss.detach())
 
-            # Write statistics
-            if (i + 1) % args.log_interval == 0 or i == last_batch_idx:
+            # Write statistics, cached-negative accumulation reaches this block only on optimizer-update boundaries
+            if (i + 1) // args.log_interval > (last_idx + 1) // args.log_interval or i == last_batch_idx:
                 time_now = time.time()
                 time_cost = time_now - start_time
                 iters_processed_in_interval = i - last_idx
@@ -746,12 +904,23 @@ def train(args: argparse.Namespace) -> None:
 
                     with torch.amp.autocast("cuda", enabled=args.amp, dtype=amp_dtype):
                         model_out = eval_model(images, texts, return_features=True)
-                        losses = criterion(
-                            image_features=model_out["image_features"],
-                            text_features=model_out["text_features"],
-                            logit_scale=model_out["logit_scale"],
-                            logit_bias=model_out["logit_bias"],
-                        )
+                        if args.loss == "coca":
+                            losses = criterion(
+                                image_features=model_out["image_features"],
+                                text_features=model_out["text_features"],
+                                logits=model_out["logits"],
+                                texts=texts,
+                                logit_scale=model_out["logit_scale"],
+                                logit_bias=model_out["logit_bias"],
+                            )
+                        else:
+                            losses = criterion(
+                                image_features=model_out["image_features"],
+                                text_features=model_out["text_features"],
+                                logit_scale=model_out["logit_scale"],
+                                logit_bias=model_out["logit_bias"],
+                            )
+
                         val_loss = sum(losses.values())
 
                     # Statistics
@@ -870,7 +1039,7 @@ def get_args_parser() -> argparse.ArgumentParser:
             "python -m birder_clip.scripts.train \\\n"
             "    --network clip \\\n"
             "    --image-encoder vit_b16 \\\n"
-            "    --text-encoder text_transformer \\\n"
+            "    --text-encoder transformer_encoder \\\n"
             "    --embed-dim 512 \\\n"
             "    --tokenizer openai_clip_bpe \\\n"
             "    --loss clip \\\n"
@@ -889,7 +1058,7 @@ def get_args_parser() -> argparse.ArgumentParser:
             "python -m birder_clip.scripts.train \\\n"
             "    --network clip \\\n"
             "    --image-encoder vit_b16_avg \\\n"
-            "    --text-encoder text_transformer \\\n"
+            "    --text-encoder transformer_encoder \\\n"
             "    --embed-dim 512 \\\n"
             "    --loss clip \\\n"
             "    --batch-size 384 \\\n"
@@ -905,11 +1074,35 @@ def get_args_parser() -> argparse.ArgumentParser:
             "    --wds \\\n"
             "    --wds-info https://huggingface.co/datasets/pixparse/cc12m-wds/resolve/main/_info.json \\\n"
             "    --wds-training-split train\n"
+            "\n"
+            "torchrun --nproc_per_node=8 -m birder_clip.scripts.train \\\n"
+            "    --network coca \\\n"
+            "    --image-encoder vit_b16_pn \\\n"
+            "    --text-encoder transformer_encoder \\\n"
+            "    --embed-dim 512 \\\n"
+            '    --model-config \'{"visual_pool": {"num_heads": 16}}\' \\\n'
+            "    --loss coca \\\n"
+            "    --coca-caption-loss-weight 2.0 \\\n"
+            "    --batch-size 384 \\\n"
+            "    --opt adamw --opt-fused \\\n"
+            "    --opt-eps 1e-6 --opt-betas 0.9 0.98 \\\n"
+            "    --lr 0.001 \\\n"
+            "    --lr-scheduler cosine \\\n"
+            "    --epochs 200 --warmup-epochs 5 \\\n"
+            "    --size 192 --context-length 64 \\\n"
+            "    --aug-type clip \\\n"
+            "    --clip-gray-prob 0.2 \\\n"
+            "    --rgb-mode clip \\\n"
+            "    --amp --amp-dtype bfloat16 \\\n"
+            "    --compile \\\n"
+            "    --wds \\\n"
+            "    --wds-info data/bio_packed/_info.json \n"
         ),
         formatter_class=cli.ArgumentHelpFormatter,
     )
     training_cli.add_model_args(parser)
     training_cli.add_loss_args(parser)
+    training_cli.add_freeze_args(parser)
     training_cli.add_optimization_args(parser)
     training_cli.add_lr_wd_args(parser)
     training_cli.add_lr_scheduler_args(parser)
@@ -920,6 +1113,7 @@ def get_args_parser() -> argparse.ArgumentParser:
     training_cli.add_data_aug_args(parser)
     training_cli.add_dataloader_args(parser)
     training_cli.add_precision_args(parser)
+    training_cli.add_grad_checkpointing_args(parser)
     training_cli.add_compile_args(parser)
     training_cli.add_checkpoint_args(parser)
     training_cli.add_distributed_args(parser)
