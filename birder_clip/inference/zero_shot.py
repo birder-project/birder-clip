@@ -13,6 +13,7 @@ from collections.abc import Callable
 from collections.abc import Iterator
 from collections.abc import Sequence
 from typing import Optional
+from typing import Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -25,6 +26,42 @@ from tqdm import tqdm
 
 from birder_clip.net.base import BaseNet
 from birder_clip.tokenizers.base import Tokenizer
+
+
+class ZeroShotInferenceModule(Protocol):
+    def __call__(self, inputs: torch.Tensor, *, tta: bool = False, return_logits: bool = False) -> torch.Tensor: ...
+
+
+class ZeroShotInference:
+    def __init__(self, net: BaseNet, text_embeddings: torch.Tensor) -> None:
+        self.net = net
+        self.text_embeddings = text_embeddings
+
+    def __call__(self, inputs: torch.Tensor, *, tta: bool = False, return_logits: bool = False) -> torch.Tensor:
+        inputs = inputs.to(self.text_embeddings.device, non_blocking=True)
+        if tta is True:
+            _, _, H, W = inputs.size()
+            crop_h = int(H * 0.8)
+            crop_w = int(W * 0.8)
+            tta_inputs = five_crop(inputs, size=[crop_h, crop_w])
+            t = v2.Resize((H, W), interpolation=v2.InterpolationMode.BICUBIC, antialias=True)
+            outs = []
+            for tta_input in tta_inputs:
+                image_embeddings = self.net.encode_image(t(tta_input), normalize=True)
+                logits = self.net.forward_logits(image_embeddings, self.text_embeddings)
+                if return_logits is True:
+                    outs.append(logits)
+                else:
+                    outs.append(F.softmax(logits, dim=-1))
+
+            return torch.stack(outs).mean(dim=0)
+
+        image_embeddings = self.net.encode_image(inputs, normalize=True)
+        logits = self.net.forward_logits(image_embeddings, self.text_embeddings)
+        if return_logits is True:
+            return logits
+
+        return F.softmax(logits, dim=-1)
 
 
 def render_prompts(class_names: Sequence[str], templates: Sequence[str]) -> list[str]:
@@ -66,39 +103,10 @@ def build_class_text_embeddings(
 DataloaderInferenceResult = tuple[list[str], npt.NDArray[np.float32], npt.NDArray[np.int64]]
 
 
-def infer_batch(
-    net: BaseNet, inputs: torch.Tensor, text_embeddings: torch.Tensor, tta: bool = False, return_logits: bool = False
-) -> torch.Tensor:
-    if tta is True:
-        _, _, H, W = inputs.size()
-        crop_h = int(H * 0.8)
-        crop_w = int(W * 0.8)
-        tta_inputs = five_crop(inputs, size=[crop_h, crop_w])
-        t = v2.Resize((H, W), interpolation=v2.InterpolationMode.BICUBIC, antialias=True)
-        outs = []
-        for tta_input in tta_inputs:
-            image_embeddings = net.encode_image(t(tta_input), normalize=True)
-            logits = net.forward_logits(image_embeddings, text_embeddings)
-            if return_logits is True:
-                outs.append(logits)
-            else:
-                outs.append(F.softmax(logits, dim=-1))
-
-        return torch.stack(outs).mean(dim=0)
-
-    image_embeddings = net.encode_image(inputs, normalize=True)
-    logits = net.forward_logits(image_embeddings, text_embeddings)
-    if return_logits is True:
-        return logits
-
-    return F.softmax(logits, dim=-1)
-
-
 def infer_dataloader_iter(
     device: torch.device,
-    net: BaseNet,
+    net: ZeroShotInferenceModule,
     dataloader: DataLoader,
-    text_embeddings: torch.Tensor,
     tta: bool = False,
     return_logits: bool = False,
     model_dtype: torch.dtype = torch.float32,
@@ -111,7 +119,6 @@ def infer_dataloader_iter(
     if chunk_size is None:
         chunk_size = float("inf")
 
-    net.to(device, dtype=model_dtype)
     out_list: list[npt.NDArray[np.float32]] = []
     labels_list: list[npt.NDArray[np.int64]] = []
     sample_paths: list[str] = []
@@ -121,9 +128,9 @@ def infer_dataloader_iter(
             batch_size = inputs.size(0)
 
             # Inference
-            inputs = inputs.to(device, dtype=model_dtype)
+            inputs = inputs.to(dtype=model_dtype)
             with torch.amp.autocast(device.type, enabled=amp, dtype=amp_dtype):
-                out = infer_batch(net, inputs, text_embeddings, return_logits=return_logits, tta=tta)
+                out = net(inputs, return_logits=return_logits, tta=tta)
                 out = out.cpu().float().numpy()
 
             out_list.append(out)

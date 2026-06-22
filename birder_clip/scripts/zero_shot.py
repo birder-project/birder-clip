@@ -36,6 +36,9 @@ from torch.utils.data import DataLoader
 
 from birder_clip.common import fs_ops
 from birder_clip.common import lib
+from birder_clip.inference.data_parallel import ZeroShotInferenceDataParallel
+from birder_clip.inference.zero_shot import ZeroShotInference
+from birder_clip.inference.zero_shot import ZeroShotInferenceModule
 from birder_clip.inference.zero_shot import build_class_text_embeddings
 from birder_clip.inference.zero_shot import infer_dataloader_iter
 from birder_clip.inference.zero_shot_templates import TEMPLATE_SETS
@@ -73,10 +76,14 @@ def predict(args: argparse.Namespace) -> None:
     else:
         device = torch.device("cpu")
 
-    if args.gpu_id is not None:
-        torch.cuda.set_device(args.gpu_id)
+    parallel = args.parallel is True and torch.cuda.device_count() > 1
+    if parallel is True:
+        logger.info(f"Using {torch.cuda.device_count()} {device} devices")
+    else:
+        if args.gpu_id is not None:
+            torch.cuda.set_device(args.gpu_id)
 
-    logger.info(f"Using device {device}")
+        logger.info(f"Using device {device}")
 
     model_dtype: torch.dtype = getattr(torch, args.model_dtype)
     if args.amp_dtype is None:
@@ -137,7 +144,7 @@ def predict(args: argparse.Namespace) -> None:
     if args.fast_matmul is True or args.amp is True:
         torch.set_float32_matmul_precision("high")
 
-    if args.compile is True:
+    if parallel is False and args.compile is True:
         net = torch.compile(net, mode=args.compile_mode)
         net.encode_image = torch.compile(net.encode_image, mode=args.compile_mode)
         net.encode_text = torch.compile(net.encode_text, mode=args.compile_mode)
@@ -254,12 +261,23 @@ def predict(args: argparse.Namespace) -> None:
         amp=args.amp,
         amp_dtype=amp_dtype,
     )
+    if parallel is True:
+        zero_shot_net: ZeroShotInferenceModule = ZeroShotInferenceDataParallel(
+            net,
+            text_embeddings,
+            output_device="cpu",
+            compile_replicas=args.compile,
+            compile_mode=args.compile_mode,
+        )
+    else:
+        net.to(device, dtype=model_dtype)
+        zero_shot_net = ZeroShotInference(net, text_embeddings)
+
     tic = time.time()
     infer_iter = infer_dataloader_iter(
         device,
-        net,
+        zero_shot_net,
         inference_loader,
-        text_embeddings,
         tta=args.tta,
         return_logits=args.save_logits,
         model_dtype=model_dtype,
@@ -481,8 +499,9 @@ def get_args_parser() -> argparse.ArgumentParser:
         "--fast-matmul", default=False, action="store_true", help="use fast matrix multiplication (affects precision)"
     )
     parser.add_argument("--gpu", default=False, action="store_true", help="use gpu")
-    parser.add_argument("--gpu-id", type=int, metavar="ID", help="gpu id to use")
+    parser.add_argument("--gpu-id", type=int, metavar="ID", help="gpu id to use (ignored in parallel mode)")
     parser.add_argument("--mps", default=False, action="store_true", help="use mps (Metal Performance Shaders) device")
+    parser.add_argument("--parallel", default=False, action="store_true", help="use multiple gpus")
     parser.add_argument("--wds", default=False, action="store_true", help="predict a webdataset directory")
     parser.add_argument("--wds-size", type=int, metavar="N", help="size of the wds dataset")
     parser.add_argument("--wds-info", type=str, action="append", metavar="FILE", help="one or more wds info file paths")
@@ -515,6 +534,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise cli.ValidationError(f"--network {args.network} not supported, see list-models tool for available options")
     if args.center_crop > 1 or args.center_crop <= 0.0:
         raise cli.ValidationError(f"--center-crop must be in range of (0, 1.0], got {args.center_crop}")
+    if args.parallel is True and args.gpu is False:
+        raise cli.ValidationError("--parallel requires --gpu to be set")
     if args.context_length is not None and args.context_length <= 0:
         raise cli.ValidationError("--context-length must be positive")
 

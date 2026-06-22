@@ -330,6 +330,38 @@ registry.register_model_config(
 )
 
 registry.register_model_config(
+    "laion_coca_vit_b32",
+    CoCa,
+    config={
+        "image": {
+            "network": "vit_b32_pn",
+            "size": (224, 224),
+        },
+        "text": {
+            "network": "transformer_encoder",
+            "config": {
+                "hidden_dim": 512,
+                "num_heads": 8,
+                "output_dim": 512,
+                "class_token": True,
+                "norm_after_pool": True,
+                "pool_type": "last",
+            },
+            "context_length": 76,
+        },
+        "decoder": {
+            "network": "conditioned_decoder",
+            "config": {
+                "num_heads": 8,
+            },
+            "context_length": 76,
+        },
+        "visual_pool": {},
+        "embed_dim": 512,
+        "tokenizer": "openai_clip_bpe",
+    },
+)
+registry.register_model_config(
     "laion_coca_vit_l14",
     CoCa,
     config={
@@ -358,6 +390,40 @@ registry.register_model_config(
         },
         "visual_pool": {},
         "embed_dim": 768,
+        "tokenizer": "openai_clip_bpe",
+    },
+)
+
+# LAION CoCa - laion/CoCa-ViT-B-32-laion2B-s13B-b90k
+registry.register_model_config(
+    "laion_coca_vit_b32_openclip_legacy",
+    OpenCLIPLegacyCoCa,
+    config={
+        "image": {
+            "network": "vit_b32_pn",
+            "size": (224, 224),
+        },
+        "text": {
+            "network": "transformer_encoder",
+            "config": {
+                "hidden_dim": 512,
+                "num_heads": 8,
+                "output_dim": 512,
+                "class_token": True,
+                "norm_after_pool": True,
+                "pool_type": "last",
+            },
+            "context_length": 76,
+        },
+        "decoder": {
+            "network": "conditioned_decoder",
+            "config": {
+                "num_heads": 8,
+            },
+            "context_length": 76,
+        },
+        "visual_pool": {},
+        "embed_dim": 512,
         "tokenizer": "openai_clip_bpe",
     },
 )

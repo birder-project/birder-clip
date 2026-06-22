@@ -557,6 +557,29 @@ registry.register_model_config(
     },
 )
 
+# EVA02 CLIP - https://arxiv.org/abs/2303.15389
+registry.register_model_config(
+    "eva02_clip_l14",
+    CLIP,
+    config={
+        "image": {
+            "network": "rope_i_vit_l14_nf_swiglu_c1",
+            "config": {"drop_path_rate": 0.0},
+            "size": (336, 336),
+        },
+        "text": {
+            "network": "transformer_encoder",
+            "config": {
+                "hidden_dim": 768,
+                "num_heads": 12,
+                "output_dim": 768,
+            },
+        },
+        "embed_dim": 768,
+        "tokenizer": "openai_clip_bpe",
+    },
+)
+
 # MetaCLIP - https://arxiv.org/abs/2309.16671
 registry.register_model_config(
     "metaclip_v1_fullcc25b_b16",
