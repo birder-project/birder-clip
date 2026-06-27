@@ -46,7 +46,6 @@ from birder.data.datasets.webdataset import wds_args_from_info
 from birder.data.transforms.classification import get_rgb_stats
 from birder.data.transforms.classification import inference_preset
 from birder.data.transforms.classification import training_preset
-from torch.distributed.fsdp import register_fsdp_forward_method
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -59,11 +58,13 @@ from birder_clip.data.datasets.csv import ImageTextCsvDataset
 from birder_clip.data.datasets.fake import FakeImageTextData
 from birder_clip.data.datasets.webdataset import make_wds_dataset
 from birder_clip.data.datasets.webdataset import prepare_wds_args
+from birder_clip.loss import CaptionLoss
 from birder_clip.loss import CLIPLoss
 from birder_clip.loss import CoCaLoss
 from birder_clip.model_registry import registry
 from birder_clip.net import CLIP
 from birder_clip.net import CoCa
+from birder_clip.net.base import CaptionGeneratorMixin
 from birder_clip.net.base import get_image_text_signature
 from birder_clip.tokenizers import get_tokenizer
 
@@ -98,9 +99,11 @@ def _encoder_fsdp_wrap_modules(
 
 def _image_text_fsdp_wrap_modules(net: torch.nn.Module, args: argparse.Namespace) -> list[torch.nn.Module]:
     image_wrap_modules = _encoder_fsdp_wrap_modules(net.image_encoder, args, encoder_name="image_encoder")
-    text_wrap_modules = _encoder_fsdp_wrap_modules(net.text_encoder, args, encoder_name="text_encoder")
+    text_wrap_modules = []
+    if net.text_encoder is not None:
+        text_wrap_modules = _encoder_fsdp_wrap_modules(net.text_encoder, args, encoder_name="text_encoder")
     decoder_wrap_modules = []
-    if hasattr(net, "text_decoder") is True:
+    if net.text_decoder is not None:
         decoder_wrap_modules = _encoder_fsdp_wrap_modules(net.text_decoder, args, encoder_name="text_decoder")
 
     wrap_modules = [*image_wrap_modules, *text_wrap_modules, *decoder_wrap_modules]
@@ -323,11 +326,18 @@ def train(args: argparse.Namespace) -> None:
     model_dtype: torch.dtype = getattr(torch, args.model_dtype)
     sample_shape = (batch_size, args.channels, *args.size)  # B, C, H, W
     text_shape = (batch_size, tokenizer.context_length)
+    if args.openvision_v2_keep_ratio is not None:
+        if args.model_config is None:
+            args.model_config = {}
+
+        args.model_config["keep_ratio"] = args.openvision_v2_keep_ratio
+
     network_name = lib.get_image_text_network_name(
         args.network,
         tag=args.tag,
         image_encoder=args.image_encoder,
         text_encoder=args.text_encoder,
+        text_decoder=args.text_decoder,
         embed_dim=args.embed_dim,
         tokenizer=args.tokenizer,
     )
@@ -338,10 +348,12 @@ def train(args: argparse.Namespace) -> None:
         args.model_config,
         image_encoder=args.image_encoder,
         text_encoder=args.text_encoder,
+        text_decoder=args.text_decoder,
         embed_dim=args.embed_dim,
         tokenizer=args.tokenizer,
         image_encoder_config=args.image_encoder_config,
         text_encoder_config=args.text_encoder_config,
+        text_decoder_config=args.text_decoder_config,
         input_channels=args.channels,
         image_size=args.size,
         context_length=tokenizer.context_length,
@@ -356,10 +368,12 @@ def train(args: argparse.Namespace) -> None:
             tag=args.tag,
             image_encoder=args.image_encoder,
             text_encoder=args.text_encoder,
+            text_decoder=args.text_decoder,
             embed_dim=args.embed_dim,
             tokenizer=args.tokenizer,
             image_encoder_config=args.image_encoder_config,
             text_encoder_config=args.text_encoder_config,
+            text_decoder_config=args.text_decoder_config,
             epoch=args.resume_epoch,
             new_size=args.size,
             new_context_length=args.context_length,
@@ -380,10 +394,12 @@ def train(args: argparse.Namespace) -> None:
             tag=args.tag,
             image_encoder=args.image_encoder,
             text_encoder=args.text_encoder,
+            text_decoder=args.text_decoder,
             embed_dim=args.embed_dim,
             tokenizer=args.tokenizer,
             image_encoder_config=args.image_encoder_config,
             text_encoder_config=args.text_encoder_config,
+            text_decoder_config=args.text_decoder_config,
             epoch=None,
             new_size=args.size,
             new_context_length=args.context_length,
@@ -421,6 +437,21 @@ def train(args: argparse.Namespace) -> None:
         assert isinstance(net, CLIP)
     elif args.loss == "coca":
         assert isinstance(net, CoCa)
+    elif args.loss == "caption":
+        assert isinstance(net, CaptionGeneratorMixin)
+
+    # Warn when the tokenizer pad id can affect text features and does not match the text encoder
+    if (
+        net.text_encoder is not None
+        and hasattr(net.text_encoder, "causal_mask") is True
+        and hasattr(net.text_encoder, "class_token") is True
+    ):
+        if net.text_encoder.causal_mask is False or net.text_encoder.class_token is not None:
+            if tokenizer.pad_token_id != getattr(net.text_encoder, "pad_token_id", None):
+                logger.warning(
+                    f"Tokenizer pad token id ({tokenizer.pad_token_id}) does not match text encoder "
+                    f"pad_token_id ({net.text_encoder.pad_token_id})"
+                )
 
     net.to(device, dtype=model_dtype)
     if args.freeze_image_encoder is True:
@@ -444,8 +475,6 @@ def train(args: argparse.Namespace) -> None:
     if fsdp_mode is True:
         fsdp_wrap_modules = _image_text_fsdp_wrap_modules(net, args)
         net = fsdp_utils.setup_fsdp(net, args, wrap_modules=fsdp_wrap_modules)
-        register_fsdp_forward_method(net, "encode_image")
-        register_fsdp_forward_method(net, "encode_text")
 
     # Compile network
     if args.compile is True:
@@ -464,6 +493,9 @@ def train(args: argparse.Namespace) -> None:
             clip_loss_weight=args.coca_contrastive_loss_weight,
             pad_token_id=tokenizer.pad_token_id,
         )
+    elif args.loss == "caption":
+        criterion = CaptionLoss(pad_token_id=tokenizer.pad_token_id)
+        caption_loss_mask = tokenizer.caption_loss_mask  # type: ignore[attr-defined]
     else:
         raise ValueError("Unsupported loss")
 
@@ -628,7 +660,7 @@ def train(args: argparse.Namespace) -> None:
         summary_writer.flush()
         fs_ops.write_config(network_name, net_for_info, signature=signature, rgb_stats=rgb_stats)
         file_handler = clip_training_utils.setup_file_logging(training_log_path.joinpath("training.log"))
-        training_utils.write_training_args_json(training_log_path, args)
+        clip_training_utils.write_training_args_json(training_log_path, args)
         training_utils.write_training_data_json(
             training_log_path,
             {
@@ -785,6 +817,12 @@ def train(args: argparse.Namespace) -> None:
                                 logit_scale=model_out["logit_scale"],
                                 logit_bias=model_out["logit_bias"],
                             )
+                        elif args.loss == "caption":
+                            losses = criterion(
+                                logits=model_out["logits"],
+                                texts=texts,
+                                target_mask=caption_loss_mask(texts),  # pylint: disable=used-before-assignment
+                            )
                         else:
                             losses = criterion(
                                 image_features=model_out["image_features"],
@@ -817,9 +855,10 @@ def train(args: argparse.Namespace) -> None:
                     optimizer.step()
 
                 optimizer.zero_grad()
-                with torch.no_grad():
-                    # Clamp as done at OpenCLIP
-                    training_utils.unwrap_compiled_module(net_without_ddp).logit_scale.clamp_(0, math.log(100.0))
+                if hasattr(training_utils.unwrap_compiled_module(net_without_ddp), "logit_scale") is True:
+                    with torch.no_grad():
+                        # Clamp as done at OpenCLIP
+                        training_utils.unwrap_compiled_module(net_without_ddp).logit_scale.clamp_(0, math.log(100.0))
 
                 if step_update is True:
                     scheduler.step()
@@ -913,6 +952,12 @@ def train(args: argparse.Namespace) -> None:
                                 logit_scale=model_out["logit_scale"],
                                 logit_bias=model_out["logit_bias"],
                             )
+                        elif args.loss == "caption":
+                            losses = criterion(
+                                logits=model_out["logits"],
+                                texts=texts,
+                                target_mask=caption_loss_mask(texts),
+                            )
                         else:
                             losses = criterion(
                                 image_features=model_out["image_features"],
@@ -997,6 +1042,8 @@ def train(args: argparse.Namespace) -> None:
             args.image_encoder_config = json.dumps(args.image_encoder_config)
         if args.text_encoder_config is not None:
             args.text_encoder_config = json.dumps(args.text_encoder_config)
+        if args.text_decoder_config is not None:
+            args.text_decoder_config = json.dumps(args.text_decoder_config)
         if args.size is not None:
             args.size = json.dumps(args.size)
 
@@ -1140,6 +1187,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise cli.ValidationError("--image-encoder-config cannot contain input_channels, use --channels")
     if args.text_encoder_config is not None and "context_length" in args.text_encoder_config:
         raise cli.ValidationError("--text-encoder-config cannot contain context_length, use --context-length")
+    if args.text_decoder_config is not None and "context_length" in args.text_decoder_config:
+        raise cli.ValidationError("--text-decoder-config cannot contain context_length, use --context-length")
 
     if args.wds is True and args.data_path is None and args.wds_info is None:
         raise cli.ValidationError("Must provide at least one data source, --data-path or --wds-info")

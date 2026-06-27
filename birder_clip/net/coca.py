@@ -20,10 +20,15 @@ from birder.conf import settings
 from birder.model_registry import registry as birder_registry
 from birder.net.base import BaseNet as ImageEncoder
 from torch import nn
+from transformers import GenerationConfig
+from transformers.generation.utils import GenerateOutput
 
 from birder_clip.model_registry import registry
 from birder_clip.net.base import BaseNet
-from birder_clip.net.text.base import TextDecoderBaseNet
+from birder_clip.net.base import CaptionGeneratorMixin
+from birder_clip.net.base import ZeroShotMixin
+from birder_clip.net.base import generate_with_hf
+from birder_clip.net.text.base import CrossAttentionTextDecoderBaseNet
 from birder_clip.net.text.base import TextEncoderBaseNet
 
 
@@ -87,7 +92,10 @@ class CoCaAttentionPool(nn.Module):
         return x
 
 
-class CoCa(BaseNet):
+class CoCa(BaseNet, CaptionGeneratorMixin, ZeroShotMixin):
+    text_encoder: TextEncoderBaseNet
+    text_decoder: CrossAttentionTextDecoderBaseNet
+
     def __init__(self, *, config: Optional[dict[str, Any]] = None) -> None:
         super().__init__(config=config)
         assert self.config is not None, "must set config"
@@ -126,7 +134,7 @@ class CoCa(BaseNet):
             config=decoder_model_config,
             context_length=decoder_config.get("context_length", text_encoder.context_length),
         )
-        assert isinstance(text_decoder, TextDecoderBaseNet)
+        assert isinstance(text_decoder, CrossAttentionTextDecoderBaseNet)
         assert text_decoder.hidden_dim == text_encoder.hidden_dim
         assert text_decoder.kv_dim == embed_dim
 
@@ -221,6 +229,57 @@ class CoCa(BaseNet):
 
         return logits
 
+    def forward_caption_features(self, image: torch.Tensor, text: torch.Tensor) -> torch.Tensor:
+        _, image_tokens = self._encode_image(image)
+        _, text_tokens = self._encode_text(text)
+        decoder_text_tokens = self.text_encoder.tokens_from_features(text_tokens)
+
+        return self.text_decoder.forward_features_from_embeddings(decoder_text_tokens, image_tokens)
+
+    def forward_caption_logits(self, image: torch.Tensor, text: torch.Tensor) -> torch.Tensor:
+        return self.text_decoder.forward_head(self.forward_caption_features(image, text))
+
+    @torch.no_grad()  # type: ignore[untyped-decorator]
+    def generate(
+        self,
+        image: torch.Tensor,
+        input_ids: Optional[torch.LongTensor] = None,
+        start_token_id: Optional[int] = None,
+        generation_config: Optional[GenerationConfig] = None,
+        **kwargs: Any,
+    ) -> torch.LongTensor | GenerateOutput:
+        input_ids = self.prepare_generation_input_ids(image, input_ids, start_token_id)
+        _, image_tokens = self._encode_image(image)
+
+        def forward(input_ids: torch.LongTensor) -> torch.Tensor:
+            current_image_tokens = image_tokens
+            if current_image_tokens.size(0) != input_ids.size(0):
+                if input_ids.size(0) % current_image_tokens.size(0) != 0:
+                    raise ValueError(
+                        "Cannot align generated token batch with image token batch: "
+                        f"input_ids batch is {input_ids.size(0)}, image batch is {current_image_tokens.size(0)}"
+                    )
+
+                repeat_count = input_ids.size(0) // current_image_tokens.size(0)
+                current_image_tokens = current_image_tokens.repeat_interleave(repeat_count, dim=0)
+
+            _, text_tokens = self._encode_text(input_ids)
+            decoder_text_tokens = self.text_encoder.tokens_from_features(text_tokens)
+            decoder_features = self.text_decoder.forward_features_from_embeddings(
+                decoder_text_tokens, current_image_tokens
+            )
+
+            return self.text_decoder.forward_head(decoder_features)
+
+        return generate_with_hf(
+            input_ids,
+            context_length=self.text_decoder.context_length,
+            vocab_size=self.text_decoder.vocab_size,
+            forward=forward,
+            generation_config=generation_config,
+            **kwargs,
+        )
+
     def forward(
         self, image: torch.Tensor, text: torch.Tensor, *, return_features: bool = False
     ) -> torch.Tensor | dict[str, Optional[torch.Tensor]]:
@@ -304,6 +363,7 @@ registry.register_model_config(
             "config": {
                 "class_token": True,
                 "norm_after_pool": True,
+                # "pad_token_id": 0,  # Must be set by user based on the tokenizer
                 "pool_type": "last",
             },
         },
@@ -345,6 +405,7 @@ registry.register_model_config(
                 "output_dim": 512,
                 "class_token": True,
                 "norm_after_pool": True,
+                "pad_token_id": 0,
                 "pool_type": "last",
             },
             "context_length": 76,
@@ -377,6 +438,7 @@ registry.register_model_config(
                 "output_dim": 768,
                 "class_token": True,
                 "norm_after_pool": True,
+                "pad_token_id": 0,
                 "pool_type": "last",
             },
             "context_length": 76,
@@ -411,6 +473,7 @@ registry.register_model_config(
                 "output_dim": 512,
                 "class_token": True,
                 "norm_after_pool": True,
+                "pad_token_id": 0,
                 "pool_type": "last",
             },
             "context_length": 76,
@@ -445,6 +508,7 @@ registry.register_model_config(
                 "output_dim": 768,
                 "class_token": True,
                 "norm_after_pool": True,
+                "pad_token_id": 0,
                 "pool_type": "last",
             },
             "context_length": 76,

@@ -27,6 +27,7 @@ def add_model_args(parser: argparse.ArgumentParser) -> None:
         help="pretrained Birder image model weights path to load into the image encoder",
     )
     parser.add_argument("--text-encoder", type=str, help="the text encoder to use")
+    parser.add_argument("--text-decoder", type=str, help="the text decoder to use")
     parser.add_argument("--embed-dim", type=int, metavar="N", help="shared image-text embedding dimension")
     parser.add_argument("--tokenizer", type=str, help="the tokenizer to use")
     parser.add_argument(
@@ -44,11 +45,21 @@ def add_model_args(parser: argparse.ArgumentParser) -> None:
         action=cli.FlexibleDictAction,
         help="override the text encoder configuration, accepts key-value pairs or JSON",
     )
+    parser.add_argument(
+        "--text-decoder-config",
+        action=cli.FlexibleDictAction,
+        help="override the text decoder configuration, accepts key-value pairs or JSON",
+    )
+    parser.add_argument(
+        "--openvision-v2-keep-ratio", type=float, help="OpenVision v2 image token keep ratio for caption decoding"
+    )
 
 
 def add_loss_args(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("Loss parameters")
-    group.add_argument("--loss", type=str, choices=["clip", "coca"], default="clip", help="loss function to use")
+    group.add_argument(
+        "--loss", type=str, choices=["clip", "coca", "caption"], default="clip", help="loss function to use"
+    )
     group.add_argument(
         "--coca-caption-loss-weight", type=float, default=1.0, help="weight assigned to CoCa caption loss"
     )
@@ -662,13 +673,16 @@ def common_args_validation(args: argparse.Namespace) -> None:
         raise cli.ValidationError("--grad-accum-steps must be >= 1")
     if args.grad_accum_cache_negatives is True and args.grad_accum_steps == 1:
         raise cli.ValidationError("--grad-accum-cache-negatives requires --grad-accum-steps greater than 1")
-    if args.grad_accum_cache_negatives is True and args.loss == "coca":
+    if args.grad_accum_cache_negatives is True and args.loss != "clip":
         raise cli.ValidationError("--grad-accum-cache-negatives is only supported with --loss clip")
 
     if args.coca_caption_loss_weight < 0.0:
         raise cli.ValidationError("--coca-caption-loss-weight must be non-negative")
     if args.coca_contrastive_loss_weight < 0.0:
         raise cli.ValidationError("--coca-contrastive-loss-weight must be non-negative")
+    if args.openvision_v2_keep_ratio is not None:
+        if args.openvision_v2_keep_ratio <= 0.0 or args.openvision_v2_keep_ratio > 1.0:
+            raise cli.ValidationError("--openvision-v2-keep-ratio must be in range of (0, 1]")
 
     # EMA
     if args.model_ema_steps < 1:

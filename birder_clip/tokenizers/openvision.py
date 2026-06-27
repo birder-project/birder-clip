@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from typing import Any
 from typing import Optional
 
@@ -45,6 +46,25 @@ class OpenVisionTokenizer:
             padding=False,
         ).input_ids
 
+    def decode(self, token_ids: Iterable[int] | torch.Tensor) -> str:
+        if isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.cpu().tolist()
+
+        body_token_ids = []
+        for token_id in token_ids:
+            if token_id in (self.pad_token_id, self.bos_token_id, self.cls_token_id):
+                continue
+            if token_id == self.eos_token_id:
+                break
+
+            body_token_ids.append(token_id)
+
+        return self.tokenizer.decode(body_token_ids, skip_special_tokens=True).strip()  # type: ignore[union-attr]
+
+    def caption_loss_mask(self, tokens: torch.Tensor) -> torch.Tensor:
+        targets = tokens[:, 1:]
+        return targets.ne(self.pad_token_id) & targets.ne(self.cls_token_id)
+
     def __call__(self, texts: str | list[str], context_length: Optional[int] = None) -> torch.LongTensor:
         if isinstance(texts, str):
             texts = [texts]
@@ -63,4 +83,7 @@ class OpenVisionTokenizer:
 
 register_tokenizer(
     "openvision_v1", OpenVisionTokenizer, source="bert-base-uncased", context_length=80, vocab_size=32000
+)
+register_tokenizer(
+    "openvision_v2", OpenVisionTokenizer, source="bert-base-uncased", context_length=128, vocab_size=32000
 )

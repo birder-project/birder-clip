@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ from birder.common import training_utils as birder_training_utils
 
 from birder_clip.common import fs_ops
 from birder_clip.conf import settings
+from birder_clip.version import __version__ as birder_clip_version
 
 
 def setup_file_logging(log_file_path: str | Path) -> logging.Handler:
@@ -26,6 +28,18 @@ def setup_file_logging(log_file_path: str | Path) -> logging.Handler:
     logging.getLogger("birder_clip").addHandler(file_handler)
 
     return file_handler
+
+
+def make_training_args_payload(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "birder_clip_version": birder_clip_version,
+        **birder_training_utils.make_training_args_payload(args),
+    }
+
+
+def write_training_args_json(path: Path, args: argparse.Namespace) -> None:
+    with open(path.joinpath("training_args.json"), "w", encoding="utf-8") as handle:
+        json.dump(make_training_args_payload(args), handle, indent=2)
 
 
 def save_training_checkpoint(

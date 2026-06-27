@@ -39,6 +39,14 @@ class TestLib(unittest.TestCase):
             ),
             "clip_maxvit_s_openai_clip_bpe_d512_exp",
         )
+        self.assertEqual(
+            lib.get_image_text_network_name(
+                "openvision_v2",
+                image_encoder="vit_l14",
+                text_decoder="visual_causal_text_decoder_s",
+            ),
+            "openvision_v2_vit_l14_visual_causal_text_decoder_s",
+        )
 
     def test_image_text_model_config(self) -> None:
         base_config = {
@@ -88,3 +96,20 @@ class TestLib(unittest.TestCase):
 
     def test_image_text_model_config_empty(self) -> None:
         self.assertIsNone(lib.get_image_text_model_config())
+
+    def test_image_text_model_config_decoder_only_context_length(self) -> None:
+        model_config = lib.get_image_text_model_config(
+            {
+                "image": {"network": "vit_s16"},
+                "decoder": {
+                    "network": "visual_causal_text_decoder",
+                    "context_length": 128,
+                },
+                "tokenizer": "openvision_v2",
+            },
+            context_length=64,
+        )
+
+        assert model_config is not None
+        self.assertNotIn("text", model_config)
+        self.assertEqual(model_config["decoder"]["context_length"], 64)

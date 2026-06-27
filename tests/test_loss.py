@@ -3,6 +3,7 @@ import unittest
 import torch
 import torch.nn.functional as F
 
+from birder_clip.loss.caption import CaptionLoss
 from birder_clip.loss.coca import CoCaLoss
 from birder_clip.loss.contrastive import CLIPLoss
 
@@ -126,4 +127,63 @@ class TestCoCaLoss(unittest.TestCase):
         )
 
         self.assertEqual(losses["contrastive_loss"].item(), 0.0)
+        self.assertTrue(torch.allclose(losses["caption_loss"], expected_caption_loss))
+
+
+class TestCaptionLoss(unittest.TestCase):
+    def test_caption_loss_full_length_logits(self) -> None:
+        criterion = CaptionLoss(pad_token_id=0)
+        logits = torch.rand(2, 4, 6, requires_grad=True)
+        texts = torch.tensor([[1, 2, 0, 0], [1, 3, 4, 0]])
+
+        losses = criterion(logits, texts)
+        expected_caption_loss = F.cross_entropy(
+            logits[:, :-1].permute(0, 2, 1),
+            texts[:, 1:],
+            ignore_index=0,
+        )
+
+        self.assertListEqual(list(losses.keys()), ["caption_loss"])
+        self.assertTrue(torch.allclose(losses["caption_loss"], expected_caption_loss))
+        losses["caption_loss"].backward()
+        self.assertIsNotNone(logits.grad)
+        self.assertTrue(torch.isfinite(logits.grad).all().item())
+
+    def test_caption_loss_shifted_logits(self) -> None:
+        criterion = CaptionLoss(pad_token_id=0)
+        logits = torch.rand(2, 3, 6)
+        texts = torch.tensor([[1, 2, 0, 0], [1, 3, 4, 0]])
+
+        losses = criterion(logits, texts)
+        expected_caption_loss = F.cross_entropy(
+            logits.permute(0, 2, 1),
+            texts[:, 1:],
+            ignore_index=0,
+        )
+
+        self.assertTrue(torch.allclose(losses["caption_loss"], expected_caption_loss))
+
+    def test_caption_loss_ignores_extra_token_ids(self) -> None:
+        criterion = CaptionLoss(ignore_token_ids=(0, 101))
+        logits = torch.rand(2, 4, 128)
+        texts = torch.tensor([[1, 2, 0, 101], [1, 3, 4, 101]])
+
+        losses = criterion(logits, texts)
+        token_loss = F.cross_entropy(logits[:, :-1].permute(0, 2, 1), texts[:, 1:], reduction="none")
+        mask = (texts[:, 1:] != 0) & (texts[:, 1:] != 101)
+        expected_caption_loss = (token_loss * mask).sum() / mask.sum()
+
+        self.assertTrue(torch.allclose(losses["caption_loss"], expected_caption_loss))
+
+    def test_caption_loss_target_mask(self) -> None:
+        criterion = CaptionLoss(pad_token_id=0)
+        logits = torch.rand(2, 3, 6)
+        texts = torch.tensor([[1, 2, 0, 0], [1, 3, 4, 0]])
+        target_mask = torch.tensor([[1, 1, 0], [1, 0, 0]], dtype=torch.bool)
+
+        losses = criterion(logits, texts, target_mask=target_mask)
+        token_loss = F.cross_entropy(logits.permute(0, 2, 1), texts[:, 1:], reduction="none")
+        mask = (texts[:, 1:] != 0) & target_mask
+        expected_caption_loss = (token_loss * mask).sum() / mask.sum()
+
         self.assertTrue(torch.allclose(losses["caption_loss"], expected_caption_loss))

@@ -9,6 +9,7 @@ from birder_clip.common import fs_ops
 from birder_clip.common import lib
 from birder_clip.model_registry import Task
 from birder_clip.model_registry import registry
+from birder_clip.net.base import ZeroShotMixin
 
 
 def get_model_info(net: torch.nn.Module) -> dict[str, float]:
@@ -61,6 +62,7 @@ def set_parser(subparsers: Any) -> None:
     )
     subparser.add_argument("--image-encoder", type=str, help="the image encoder to use")
     subparser.add_argument("--text-encoder", type=str, help="the text encoder to use")
+    subparser.add_argument("--text-decoder", type=str, help="the text decoder to use")
     subparser.add_argument("--embed-dim", type=int, metavar="N", help="shared image-text embedding dimension")
     subparser.add_argument("--tokenizer", type=str, help="the tokenizer to use")
     subparser.add_argument(
@@ -72,6 +74,11 @@ def set_parser(subparsers: Any) -> None:
         "--text-encoder-config",
         action=cli.FlexibleDictAction,
         help="override the text encoder configuration, accepts key-value pairs or JSON",
+    )
+    subparser.add_argument(
+        "--text-decoder-config",
+        action=cli.FlexibleDictAction,
+        help="override the text decoder configuration, accepts key-value pairs or JSON",
     )
     subparser.add_argument("-e", "--epoch", type=int, metavar="N", help="model checkpoint to load")
     subparser.add_argument("-t", "--tag", type=str, help="model tag (from the training phase)")
@@ -89,11 +96,16 @@ def main(args: argparse.Namespace) -> None:
         args.tokenizer = "simple_tokenizer"
 
     registered_config = registry.all_nets[args.network.lower()].config  # type: ignore[misc]
+    net_type = registry.all_nets[args.network.lower()]
     if registered_config is None:
         registered_config = {}
     if args.image_encoder is None and registered_config.get("image", {}).get("network") is None:
         raise cli.ValidationError("--image-encoder is required for this network")
-    if args.text_encoder is None and registered_config.get("text", {}).get("network") is None:
+    if (
+        issubclass(net_type, ZeroShotMixin) is True
+        and args.text_encoder is None
+        and registered_config.get("text", {}).get("network") is None
+    ):
         raise cli.ValidationError("--text-encoder is required for this network")
 
     reserved_model_config_keys = lib.get_reserved_model_config_keys(args.model_config)
@@ -107,6 +119,8 @@ def main(args: argparse.Namespace) -> None:
         raise cli.ValidationError("--image-encoder-config cannot contain input_channels")
     if args.text_encoder_config is not None and "context_length" in args.text_encoder_config:
         raise cli.ValidationError("--text-encoder-config cannot contain context_length")
+    if args.text_decoder_config is not None and "context_length" in args.text_decoder_config:
+        raise cli.ValidationError("--text-decoder-config cannot contain context_length")
 
     # Load model
     device = torch.device("cpu")
@@ -117,10 +131,12 @@ def main(args: argparse.Namespace) -> None:
         tag=args.tag,
         image_encoder=args.image_encoder,
         text_encoder=args.text_encoder,
+        text_decoder=args.text_decoder,
         embed_dim=args.embed_dim,
         tokenizer=args.tokenizer,
         image_encoder_config=args.image_encoder_config,
         text_encoder_config=args.text_encoder_config,
+        text_decoder_config=args.text_decoder_config,
         epoch=args.epoch,
         inference=True,
         st=args.st,
@@ -137,7 +153,11 @@ def main(args: argparse.Namespace) -> None:
 
     console.print()
     print_model_info(console, "Image encoder", net.image_encoder)
-    print_model_info(console, "Text encoder", net.text_encoder)
+    if net.text_encoder is not None:
+        print_model_info(console, "Text encoder", net.text_encoder)
+    if net.text_decoder is not None:
+        print_model_info(console, "Text decoder", net.text_decoder)
+
     print_model_info(console, "Full model", net)
 
     if is_nan is True:

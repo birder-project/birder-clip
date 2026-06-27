@@ -4,6 +4,7 @@ import unittest
 import torch
 
 from birder_clip.model_registry import registry
+from birder_clip.net.text.base import VisualCausalTextDecoderBaseNet
 from birder_clip.net.text.encoder import _global_pool
 
 logging.disable(logging.CRITICAL)
@@ -93,4 +94,47 @@ class TestTextNetworks(unittest.TestCase):
         logits = net.forward_head(features)
 
         self.assertSequenceEqual(logits.shape, (2, 5, TEST_VOCAB_SIZE))
+        self.assertTrue(torch.isfinite(logits).all())
+
+    def test_text_visual_causal_text_decoder_forward(self) -> None:
+        net = registry.text_decoder_factory(
+            "visual_causal_text_decoder",
+            config={"vocab_size": TEST_VOCAB_SIZE, "hidden_dim": 192, "num_heads": 3, "num_layers": 2},
+            context_length=TEST_CONTEXT_LENGTH,
+        )
+
+        text = torch.randint(0, TEST_VOCAB_SIZE, (2, 5))
+        image_tokens = torch.rand(2, 6, net.kv_dim)
+        self.assertIsInstance(net, VisualCausalTextDecoderBaseNet)
+        logits = net(text, image_tokens)
+
+        self.assertSequenceEqual(logits.shape, (2, 5, TEST_VOCAB_SIZE))
+        self.assertTrue(torch.isfinite(logits).all())
+
+        adjusted_context_length = TEST_CONTEXT_LENGTH + 4
+        net.adjust_context_length(adjusted_context_length)
+        text = torch.randint(0, TEST_VOCAB_SIZE, (2, adjusted_context_length))
+        logits = net(text, image_tokens)
+
+        self.assertSequenceEqual(logits.shape, (2, adjusted_context_length, TEST_VOCAB_SIZE))
+        self.assertTrue(torch.isfinite(logits).all())
+
+    def test_text_visual_causal_text_decoder_shift_input_tokens(self) -> None:
+        net = registry.text_decoder_factory(
+            "visual_causal_text_decoder",
+            config={
+                "vocab_size": TEST_VOCAB_SIZE,
+                "hidden_dim": 192,
+                "num_heads": 3,
+                "num_layers": 2,
+                "shift_input_tokens": True,
+            },
+            context_length=TEST_CONTEXT_LENGTH,
+        )
+
+        text = torch.randint(0, TEST_VOCAB_SIZE, (2, 5))
+        image_tokens = torch.rand(2, 6, net.kv_dim)
+        logits = net(text, image_tokens)
+
+        self.assertSequenceEqual(logits.shape, (2, 4, TEST_VOCAB_SIZE))
         self.assertTrue(torch.isfinite(logits).all())

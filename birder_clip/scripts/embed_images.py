@@ -24,6 +24,7 @@ from birder.data.datasets.webdataset import prepare_wds_args
 from birder.data.datasets.webdataset import wds_args_from_info
 from birder.data.transforms.classification import inference_preset
 from birder.inference.data_parallel import InferenceDataParallel
+from birder.scripts.predict import ndarray_to_fixed_size_list_array
 from torch.utils.data import DataLoader
 
 from birder_clip.common import fs_ops
@@ -31,6 +32,7 @@ from birder_clip.common import lib
 from birder_clip.inference.image_embeddings import infer_dataloader_iter
 from birder_clip.model_registry import Task
 from birder_clip.model_registry import registry
+from birder_clip.net.base import ZeroShotMixin
 from birder_clip.version import __version__
 
 logger = logging.getLogger(__name__)
@@ -59,7 +61,7 @@ def save_embeddings_parquet(
 ) -> None:
     logger.info(f"Writing embeddings at {writer.where}")
     data = {"sample": pa.array(sample_paths, type=pa.string())}
-    data["embedding"] = pa.array(embeddings.tolist(), type=writer.schema.field("embedding").type)
+    data["embedding"] = ndarray_to_fixed_size_list_array(embeddings, writer.schema.field("embedding").type)
     table = pa.Table.from_pydict(data, schema=writer.schema)
     writer.write_table(table)
 
@@ -92,6 +94,7 @@ def embed(args: argparse.Namespace) -> None:
         tag=args.tag,
         image_encoder=args.image_encoder,
         text_encoder=args.text_encoder,
+        text_decoder=args.text_decoder,
         embed_dim=args.embed_dim,
         tokenizer=args.tokenizer,
     )
@@ -102,10 +105,12 @@ def embed(args: argparse.Namespace) -> None:
         tag=args.tag,
         image_encoder=args.image_encoder,
         text_encoder=args.text_encoder,
+        text_decoder=args.text_decoder,
         embed_dim=args.embed_dim,
         tokenizer=args.tokenizer,
         image_encoder_config=args.image_encoder_config,
         text_encoder_config=args.text_encoder_config,
+        text_decoder_config=args.text_decoder_config,
         epoch=args.epoch,
         new_size=args.size,
         new_context_length=args.context_length,
@@ -115,6 +120,8 @@ def embed(args: argparse.Namespace) -> None:
     )
     logger.debug(f"Model loaded with signature: {model_info.signature}")
     logger.debug(f"RGB stats: {model_info.rgb_stats}")
+    if isinstance(net, ZeroShotMixin) is False:
+        raise TypeError(f"{net.__class__.__name__} does not support zero-shot image embedding export")
 
     if args.tokenizer is not None:
         tokenizer_name = args.tokenizer
@@ -275,6 +282,7 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument("-n", "--network", type=str, help="the image-text network to use")
     parser.add_argument("--image-encoder", type=str, help="the image encoder to use")
     parser.add_argument("--text-encoder", type=str, help="the text encoder to use")
+    parser.add_argument("--text-decoder", type=str, help="the text decoder to use")
     parser.add_argument("--embed-dim", type=int, metavar="N", help="shared image-text embedding dimension")
     parser.add_argument("--tokenizer", type=str, help="the tokenizer to use")
     parser.add_argument(
@@ -286,6 +294,11 @@ def get_args_parser() -> argparse.ArgumentParser:
         "--text-encoder-config",
         action=cli.FlexibleDictAction,
         help="override the text encoder configuration, accepts key-value pairs or JSON",
+    )
+    parser.add_argument(
+        "--text-decoder-config",
+        action=cli.FlexibleDictAction,
+        help="override the text decoder configuration, accepts key-value pairs or JSON",
     )
     parser.add_argument("-e", "--epoch", type=int, metavar="N", help="model checkpoint to load")
     parser.add_argument("-t", "--tag", type=str, help="model tag")
@@ -388,6 +401,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise cli.ValidationError("--image-encoder-config cannot contain size, use --size")
     if args.text_encoder_config is not None and "context_length" in args.text_encoder_config:
         raise cli.ValidationError("--text-encoder-config cannot contain context_length, use --context-length")
+    if args.text_decoder_config is not None and "context_length" in args.text_decoder_config:
+        raise cli.ValidationError("--text-decoder-config cannot contain context_length, use --context-length")
 
     if args.compile_mode is not None and args.compile is False:
         raise cli.ValidationError("--compile-mode requires --compile")

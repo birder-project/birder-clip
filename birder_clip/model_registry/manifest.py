@@ -11,8 +11,8 @@ FormatInfoType = TypedDict(
     {"file_size": float, "sha256": str},
 )
 
-EncoderInfoType = TypedDict(
-    "EncoderInfoType",
+ImageEncoderInfoType = TypedDict(
+    "ImageEncoderInfoType",
     {
         "network": str,
         "config": NotRequired[dict[str, Any]],
@@ -21,16 +21,33 @@ EncoderInfoType = TypedDict(
         "size": NotRequired[tuple[int, int]],
     },
 )
+TextEncoderInfoType = TypedDict(
+    "TextEncoderInfoType",
+    {
+        "network": str,
+        "config": NotRequired[dict[str, Any]],
+    },
+)
+TextDecoderInfoType = TypedDict(
+    "TextDecoderInfoType",
+    {
+        "network": str,
+        "config": NotRequired[dict[str, Any]],
+    },
+)
 
-EncoderMetadataType: TypeAlias = str | EncoderInfoType
+ImageEncoderMetadataType: TypeAlias = str | ImageEncoderInfoType
+TextEncoderMetadataType: TypeAlias = str | TextEncoderInfoType
+TextDecoderMetadataType: TypeAlias = str | TextDecoderInfoType
 
 NetworkInfoType = TypedDict(
     "NetworkInfoType",
     {
         "network": str,
         "tag": NotRequired[str],
-        "image_encoder": NotRequired[EncoderMetadataType],
-        "text_encoder": NotRequired[EncoderMetadataType],
+        "image_encoder": NotRequired[ImageEncoderMetadataType],
+        "text_encoder": NotRequired[TextEncoderMetadataType],
+        "text_decoder": NotRequired[TextDecoderMetadataType],
         "embed_dim": NotRequired[int],
         "tokenizer": NotRequired[str],
     },

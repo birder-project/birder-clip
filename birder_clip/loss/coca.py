@@ -26,9 +26,7 @@ class CoCaLoss(torch.nn.Module):
     captioning cross entropy over decoder logits.
     """
 
-    def __init__(
-        self, *, caption_loss_weight: float = 1.0, clip_loss_weight: float = 1.0, pad_token_id: int = 0
-    ) -> None:
+    def __init__(self, caption_loss_weight: float = 1.0, clip_loss_weight: float = 1.0, pad_token_id: int = 0) -> None:
         super().__init__()
         self.caption_loss_weight = caption_loss_weight
         self.clip_loss_weight = clip_loss_weight

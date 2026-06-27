@@ -20,6 +20,7 @@ from birder_clip.inference.zero_shot_templates import TEMPLATE_SETS
 from birder_clip.model_registry import Task
 from birder_clip.model_registry import registry
 from birder_clip.net.base import SignatureType
+from birder_clip.net.base import ZeroShotMixin
 from birder_clip.tokenizers import get_tokenizer
 
 logger = logging.getLogger(__name__)
@@ -189,6 +190,7 @@ def set_parser(subparsers: Any) -> None:
     )
     subparser.add_argument("--image-encoder", type=str, help="the image encoder to use")
     subparser.add_argument("--text-encoder", type=str, help="the text encoder to use")
+    subparser.add_argument("--text-decoder", type=str, help="the text decoder to use")
     subparser.add_argument("--embed-dim", type=int, metavar="N", help="shared image-text embedding dimension")
     subparser.add_argument("--tokenizer", type=str, help="the tokenizer to use")
     subparser.add_argument(
@@ -200,6 +202,11 @@ def set_parser(subparsers: Any) -> None:
         "--text-encoder-config",
         action=cli.FlexibleDictAction,
         help="override the text encoder configuration, accepts key-value pairs or JSON",
+    )
+    subparser.add_argument(
+        "--text-decoder-config",
+        action=cli.FlexibleDictAction,
+        help="override the text decoder configuration, accepts key-value pairs or JSON",
     )
     subparser.add_argument("-e", "--epoch", type=int, metavar="N", help="model checkpoint to load")
     subparser.add_argument("-t", "--tag", type=str, help="model tag (from the training phase)")
@@ -247,14 +254,17 @@ def main(args: argparse.Namespace) -> None:
         raise cli.ValidationError(f"--network {args.network} not supported, see list-models tool for available options")
 
     registered_config = registry.all_nets[args.network.lower()].config  # type: ignore[misc]
+    net_type = registry.all_nets[args.network.lower()]
     if registered_config is None:
         registered_config = {}
     if args.image_encoder is None and registered_config.get("image", {}).get("network") is None:
         raise cli.ValidationError("--image-encoder is required for this network")
-    if args.text_encoder is None and registered_config.get("text", {}).get("network") is None:
-        raise cli.ValidationError("--text-encoder is required for this network")
-    if args.embed_dim is None and registered_config.get("embed_dim") is None:
-        raise cli.ValidationError("--embed-dim is required for this network")
+
+    if issubclass(net_type, ZeroShotMixin) is True:
+        if args.text_encoder is None and registered_config.get("text", {}).get("network") is None:
+            raise cli.ValidationError("--text-encoder is required for this network")
+        if args.embed_dim is None and registered_config.get("embed_dim") is None:
+            raise cli.ValidationError("--embed-dim is required for this network")
 
     reserved_model_config_keys = lib.get_reserved_model_config_keys(args.model_config)
     if len(reserved_model_config_keys) > 0:
@@ -267,6 +277,8 @@ def main(args: argparse.Namespace) -> None:
         raise cli.ValidationError("--image-encoder-config cannot contain input_channels")
     if args.text_encoder_config is not None and "context_length" in args.text_encoder_config:
         raise cli.ValidationError("--text-encoder-config cannot contain context_length")
+    if args.text_decoder_config is not None and "context_length" in args.text_decoder_config:
+        raise cli.ValidationError("--text-decoder-config cannot contain context_length")
     if args.image_classifier is False:
         if args.class_file is not None or args.classes is not None:
             raise cli.ValidationError("--class-file and --classes require --image-classifier")
@@ -279,6 +291,8 @@ def main(args: argparse.Namespace) -> None:
         raise cli.ValidationError("--class-file and --classes cannot be used together")
     if args.image_classifier is True and args.class_file is None and args.classes is None:
         raise cli.ValidationError("--image-classifier requires --class-file or --classes")
+    if args.image_classifier is True and issubclass(net_type, ZeroShotMixin) is False:
+        raise cli.ValidationError("--image-classifier requires a zero-shot capable network")
     if args.classes is not None and len(args.classes) == 0:
         raise cli.ValidationError("--classes requires at least one class name")
     if args.template is not None and args.template_file is not None:
@@ -297,10 +311,12 @@ def main(args: argparse.Namespace) -> None:
         tag=args.tag,
         image_encoder=args.image_encoder,
         text_encoder=args.text_encoder,
+        text_decoder=args.text_decoder,
         embed_dim=args.embed_dim,
         tokenizer=args.tokenizer,
         image_encoder_config=args.image_encoder_config,
         text_encoder_config=args.text_encoder_config,
+        text_decoder_config=args.text_decoder_config,
         epoch=args.epoch,
         inference=True,
     )
@@ -310,6 +326,7 @@ def main(args: argparse.Namespace) -> None:
         tag=args.tag,
         image_encoder=args.image_encoder,
         text_encoder=args.text_encoder,
+        text_decoder=args.text_decoder,
         embed_dim=args.embed_dim,
         tokenizer=args.tokenizer,
     )

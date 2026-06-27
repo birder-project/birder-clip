@@ -170,6 +170,11 @@ class ModelRegistry:
             if context_length is not None:
                 return context_length  # type: ignore[no-any-return]
 
+            decoder_config = config.get("decoder", {})
+            context_length = decoder_config.get("context_length")
+            if context_length is not None:
+                return context_length  # type: ignore[no-any-return]
+
             if tokenizer is None:
                 tokenizer = config.get("tokenizer")
 

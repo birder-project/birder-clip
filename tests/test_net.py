@@ -11,6 +11,8 @@ from parameterized import parameterized
 
 from birder_clip.model_registry import registry
 from birder_clip.net.base import BaseNet
+from birder_clip.net.base import CaptionGeneratorMixin
+from birder_clip.net.base import ZeroShotMixin
 
 logging.disable(logging.CRITICAL)
 
@@ -33,6 +35,11 @@ COCA_TEST_CASES = [
     ("regnet_y_200m", "transformer_encoder_small", {"pool_type": "last"}),
     ("focalnet_t_srf", "transformer_encoder_small", {"pool_type": "last"}),
     ("vit_s16", "transformer_encoder_small", {"pool_type": "last"}),
+]
+
+OPENVISION_V2_TEST_CASES = [
+    # Image encoder
+    ("vit_s16",),
 ]
 
 
@@ -303,6 +310,7 @@ class TestCoCa(unittest.TestCase):
                         "eos_token_id": TEST_EOS_TOKEN_ID,
                         "class_token": True,
                         "norm_after_pool": True,
+                        "pad_token_id": 0,
                         **text_config,
                     },
                     "context_length": TEST_CONTEXT_LENGTH,
@@ -405,6 +413,69 @@ class TestCoCa(unittest.TestCase):
 
     @parameterized.expand(COCA_TEST_CASES)  # type: ignore[untyped-decorator]
     @unittest.skipUnless(env_bool("SLOW_TESTS"), "Avoid slow tests")
+    def test_generate(self, image_encoder: str, text_encoder: str, text_config: dict[str, Any]) -> None:
+        batch_size = 2
+        n = registry.net_factory(
+            "coca",
+            config={
+                "image": {
+                    "network": image_encoder,
+                    "input_channels": DEFAULT_NUM_CHANNELS,
+                    "size": TEST_IMAGE_SIZE,
+                },
+                "text": {
+                    "network": text_encoder,
+                    "config": {
+                        "vocab_size": TEST_VOCAB_SIZE,
+                        "eos_token_id": TEST_EOS_TOKEN_ID,
+                        "class_token": True,
+                        "norm_after_pool": True,
+                        "pad_token_id": 0,
+                        **text_config,
+                    },
+                    "context_length": TEST_CONTEXT_LENGTH,
+                },
+                "decoder": {
+                    "network": "conditioned_decoder",
+                    "config": {
+                        "num_heads": 6,
+                        "num_layers": 2,
+                    },
+                    "context_length": TEST_CONTEXT_LENGTH,
+                },
+                "visual_pool": {
+                    "num_heads": 6,
+                    "latent_len": 8,
+                },
+                "embed_dim": TEST_EMBED_DIM,
+                "tokenizer": "simple_tokenizer",
+            },
+        )
+
+        image = torch.rand((batch_size, DEFAULT_NUM_CHANNELS, *TEST_IMAGE_SIZE))
+        prompt = torch.ones((batch_size, 1), dtype=torch.long)
+        generated = n.generate(
+            image,
+            start_token_id=1,
+            max_new_tokens=1,
+            eos_token_id=TEST_EOS_TOKEN_ID,
+            pad_token_id=0,
+        )
+        beam_generated = n.generate(
+            image[:1],
+            prompt[:1],
+            max_new_tokens=1,
+            num_beams=2,
+            eos_token_id=TEST_EOS_TOKEN_ID,
+            pad_token_id=0,
+        )
+
+        self.assertEqual(generated.dtype, torch.long)
+        self.assertSequenceEqual(generated.shape, (batch_size, 2))
+        self.assertSequenceEqual(beam_generated.shape, (1, 2))
+
+    @parameterized.expand(COCA_TEST_CASES)  # type: ignore[untyped-decorator]
+    @unittest.skipUnless(env_bool("SLOW_TESTS"), "Avoid slow tests")
     def test_net_backward(self, image_encoder: str, text_encoder: str, text_config: dict[str, Any]) -> None:
         batch_size = 2
         n = registry.net_factory(
@@ -422,6 +493,7 @@ class TestCoCa(unittest.TestCase):
                         "eos_token_id": TEST_EOS_TOKEN_ID,
                         "class_token": True,
                         "norm_after_pool": True,
+                        "pad_token_id": 0,
                         **text_config,
                     },
                     "context_length": TEST_CONTEXT_LENGTH,
@@ -474,6 +546,7 @@ class TestCoCa(unittest.TestCase):
                         "eos_token_id": TEST_EOS_TOKEN_ID,
                         "class_token": True,
                         "norm_after_pool": True,
+                        "pad_token_id": 0,
                         **text_config,
                     },
                     "context_length": TEST_CONTEXT_LENGTH,
@@ -537,6 +610,7 @@ class TestCoCa(unittest.TestCase):
                         "eos_token_id": TEST_EOS_TOKEN_ID,
                         "class_token": True,
                         "norm_after_pool": True,
+                        "pad_token_id": 0,
                         **text_config,
                     },
                     "context_length": TEST_CONTEXT_LENGTH,
@@ -568,5 +642,273 @@ class TestCoCa(unittest.TestCase):
                 dynamic_shapes={
                     "image": {0: image_batch_dim},
                     "text": {0: text_batch_dim},
+                },
+            )
+
+
+class TestOpenVisionV2(unittest.TestCase):
+    @parameterized.expand(OPENVISION_V2_TEST_CASES)  # type: ignore[untyped-decorator]
+    def test_net(self, image_encoder: str) -> None:
+        batch_size = 2
+        n = registry.net_factory(
+            "openvision_v2",
+            config={
+                "image": {
+                    "network": image_encoder,
+                    "input_channels": DEFAULT_NUM_CHANNELS,
+                    "size": TEST_IMAGE_SIZE,
+                },
+                "decoder": {
+                    "network": "visual_causal_text_decoder",
+                    "config": {
+                        "vocab_size": TEST_VOCAB_SIZE,
+                        "hidden_dim": 192,
+                        "num_heads": 3,
+                        "num_layers": 2,
+                        "mlp_dim": 768,
+                    },
+                    "context_length": TEST_CONTEXT_LENGTH,
+                },
+                "keep_ratio": 1.0,
+                "tokenizer": "simple_tokenizer",
+            },
+        )
+        size = TEST_IMAGE_SIZE
+
+        self.assertIsInstance(n, CaptionGeneratorMixin)
+        self.assertNotIsInstance(n, ZeroShotMixin)
+        self.assertIsNone(n.text_encoder)
+        self.assertIsNotNone(n.text_decoder)
+        self.assertEqual(n.embedding_size, n.text_decoder.hidden_dim)  # type: ignore[union-attr]
+        self.assertEqual(n.tokenizer_name, "simple_tokenizer")
+
+        # Ensure config is serializable
+        _ = json.dumps(n.config)
+
+        # Test network
+        image = torch.rand((batch_size, DEFAULT_NUM_CHANNELS, *size))
+        text = _text_tokens(batch_size)
+        logits = n(image, text)
+
+        self.assertSequenceEqual(logits.shape, (batch_size, TEST_CONTEXT_LENGTH - 1, TEST_VOCAB_SIZE))
+        self.assertFalse(torch.isnan(logits).any())
+
+        n.eval()
+        with torch.inference_mode():
+            eval_logits = n(image, text)
+            caption_logits = n.forward_caption_logits(image, text)
+            out = n(image, text, return_features=True)
+
+        n.train()
+
+        torch.testing.assert_close(caption_logits, eval_logits)
+        self.assertSetEqual(set(out.keys()), {"features", "logits"})
+        self.assertSequenceEqual(out["features"].shape, (batch_size, TEST_CONTEXT_LENGTH - 1, n.embedding_size))
+        self.assertSequenceEqual(out["logits"].shape, (batch_size, TEST_CONTEXT_LENGTH - 1, TEST_VOCAB_SIZE))
+        self.assertFalse(torch.isnan(out["features"]).any())
+        self.assertFalse(torch.isnan(out["logits"]).any())
+
+        # Adjust size
+        size = (n.image_encoder.size[0] + 32, n.image_encoder.size[1] + 32)
+        n.adjust_image_size(size)
+        logits = n(torch.rand((batch_size, DEFAULT_NUM_CHANNELS, *size)), text)
+
+        self.assertSequenceEqual(logits.shape, (batch_size, TEST_CONTEXT_LENGTH - 1, TEST_VOCAB_SIZE))
+        self.assertFalse(torch.isnan(logits).any())
+
+        # Adjust context length
+        context_length = 10
+        n.adjust_context_length(context_length)
+        text = torch.tensor(
+            [
+                [1, 2, TEST_EOS_TOKEN_ID, 0, 0, 0, 0, 0, 0, 0],
+                [1, 2, 5, 6, TEST_EOS_TOKEN_ID, 0, 0, 0, 0, 0],
+            ]
+        )
+        logits = n(torch.rand((batch_size, DEFAULT_NUM_CHANNELS, *size)), text)
+
+        self.assertSequenceEqual(logits.shape, (batch_size, context_length - 1, TEST_VOCAB_SIZE))
+        self.assertFalse(torch.isnan(logits).any())
+
+        # Ensure model is copyable
+        n_copy = copy.deepcopy(n)
+        self.assertIsNotNone(n_copy)
+
+    @parameterized.expand(OPENVISION_V2_TEST_CASES)  # type: ignore[untyped-decorator]
+    @unittest.skipUnless(env_bool("SLOW_TESTS"), "Avoid slow tests")
+    def test_generate(self, image_encoder: str) -> None:
+        batch_size = 2
+        n = registry.net_factory(
+            "openvision_v2",
+            config={
+                "image": {
+                    "network": image_encoder,
+                    "input_channels": DEFAULT_NUM_CHANNELS,
+                    "size": TEST_IMAGE_SIZE,
+                },
+                "decoder": {
+                    "network": "visual_causal_text_decoder",
+                    "config": {
+                        "vocab_size": TEST_VOCAB_SIZE,
+                        "hidden_dim": 192,
+                        "num_heads": 3,
+                        "num_layers": 2,
+                        "mlp_dim": 768,
+                    },
+                    "context_length": TEST_CONTEXT_LENGTH,
+                },
+                "keep_ratio": 1.0,
+                "tokenizer": "simple_tokenizer",
+            },
+        )
+
+        image = torch.rand((batch_size, DEFAULT_NUM_CHANNELS, *TEST_IMAGE_SIZE))
+        prompt = torch.ones((batch_size, 1), dtype=torch.long)
+        generated = n.generate(
+            image,
+            start_token_id=1,
+            max_new_tokens=1,
+            eos_token_id=TEST_EOS_TOKEN_ID,
+            pad_token_id=0,
+        )
+        beam_generated = n.generate(
+            image[:1],
+            prompt[:1],
+            max_new_tokens=1,
+            num_beams=2,
+            eos_token_id=TEST_EOS_TOKEN_ID,
+            pad_token_id=0,
+        )
+
+        self.assertEqual(generated.dtype, torch.long)
+        self.assertSequenceEqual(generated.shape, (batch_size, 2))
+        self.assertSequenceEqual(beam_generated.shape, (1, 2))
+
+    @parameterized.expand(OPENVISION_V2_TEST_CASES)  # type: ignore[untyped-decorator]
+    @unittest.skipUnless(env_bool("SLOW_TESTS"), "Avoid slow tests")
+    def test_net_backward(self, image_encoder: str) -> None:
+        batch_size = 2
+        n = registry.net_factory(
+            "openvision_v2",
+            config={
+                "image": {
+                    "network": image_encoder,
+                    "input_channels": DEFAULT_NUM_CHANNELS,
+                    "size": TEST_IMAGE_SIZE,
+                },
+                "decoder": {
+                    "network": "visual_causal_text_decoder",
+                    "config": {
+                        "vocab_size": TEST_VOCAB_SIZE,
+                        "hidden_dim": 192,
+                        "num_heads": 3,
+                        "num_layers": 2,
+                        "mlp_dim": 768,
+                    },
+                    "context_length": TEST_CONTEXT_LENGTH,
+                },
+                "keep_ratio": 1.0,
+                "tokenizer": "simple_tokenizer",
+            },
+        )
+
+        out = n(
+            torch.rand((batch_size, DEFAULT_NUM_CHANNELS, *TEST_IMAGE_SIZE)),
+            _text_tokens(batch_size),
+            return_features=True,
+        )
+
+        loss = out["features"].sum() + out["logits"].sum()
+        loss.backward()
+        for name, param in n.named_parameters():
+            self.assertIsNotNone(param.grad, msg=f"missing grad for {name}")
+            self.assertTrue(torch.isfinite(param.grad).all().item(), msg=f"non-finite grad for {name}")
+
+    @parameterized.expand(OPENVISION_V2_TEST_CASES)  # type: ignore[untyped-decorator]
+    @unittest.skipUnless(env_bool("SLOW_TESTS"), "Avoid slow tests")
+    def test_grad_checkpointing(self, image_encoder: str) -> None:
+        batch_size = 1
+        n = registry.net_factory(
+            "openvision_v2",
+            config={
+                "image": {
+                    "network": image_encoder,
+                    "input_channels": DEFAULT_NUM_CHANNELS,
+                    "size": TEST_IMAGE_SIZE,
+                },
+                "decoder": {
+                    "network": "visual_causal_text_decoder",
+                    "config": {
+                        "vocab_size": TEST_VOCAB_SIZE,
+                        "hidden_dim": 192,
+                        "num_heads": 3,
+                        "num_layers": 2,
+                        "mlp_dim": 768,
+                    },
+                    "context_length": TEST_CONTEXT_LENGTH,
+                },
+                "keep_ratio": 1.0,
+                "tokenizer": "simple_tokenizer",
+            },
+        )
+        image = torch.rand((batch_size, DEFAULT_NUM_CHANNELS, *TEST_IMAGE_SIZE))
+        text = _text_tokens(batch_size)
+
+        n.eval()
+        with torch.no_grad():
+            expected = n(image, text, return_features=True)
+
+        n.set_grad_checkpointing(segments=4)
+        out = n(image, text, return_features=True)
+
+        # Verify forward with checkpointing
+        torch.testing.assert_close(out["features"], expected["features"])
+        torch.testing.assert_close(out["logits"], expected["logits"])
+        self.assertTrue(torch.isfinite(out["features"]).all().item())
+        self.assertTrue(torch.isfinite(out["logits"]).all().item())
+
+        # Check grads
+        loss = out["features"].sum() + out["logits"].sum()
+        loss.backward()
+        for name, param in n.named_parameters():
+            self.assertIsNotNone(param.grad, msg=f"missing grad for {name}")
+            self.assertTrue(torch.isfinite(param.grad).all().item(), msg=f"non-finite grad for {name}")
+
+    @parameterized.expand(OPENVISION_V2_TEST_CASES)  # type: ignore[untyped-decorator]
+    @unittest.skipUnless(env_bool("SLOW_TESTS"), "Avoid slow tests")
+    def test_net_pt2(self, image_encoder: str) -> None:
+        n = registry.net_factory(
+            "openvision_v2",
+            config={
+                "image": {
+                    "network": image_encoder,
+                    "input_channels": DEFAULT_NUM_CHANNELS,
+                    "size": TEST_IMAGE_SIZE,
+                },
+                "decoder": {
+                    "network": "visual_causal_text_decoder",
+                    "config": {
+                        "vocab_size": TEST_VOCAB_SIZE,
+                        "hidden_dim": 192,
+                        "num_heads": 3,
+                        "num_layers": 2,
+                        "mlp_dim": 768,
+                    },
+                    "context_length": TEST_CONTEXT_LENGTH,
+                },
+                "keep_ratio": 1.0,
+                "tokenizer": "simple_tokenizer",
+            },
+        )
+        n.eval()
+
+        batch_dim = torch.export.Dim("batch")
+        with torch.no_grad():
+            torch.export.export(
+                n,
+                (torch.randn(2, DEFAULT_NUM_CHANNELS, *TEST_IMAGE_SIZE), _text_tokens(2)),
+                dynamic_shapes={
+                    "image": {0: batch_dim},
+                    "text": {0: batch_dim},
                 },
             )

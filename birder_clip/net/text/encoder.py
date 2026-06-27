@@ -9,6 +9,7 @@ import logging
 from collections.abc import Callable
 from functools import partial
 from typing import Any
+from typing import ClassVar
 from typing import Literal
 from typing import Optional
 
@@ -38,6 +39,7 @@ def _global_pool(
     if pool_type == "first":
         return x[:, 0]
     if pool_type == "last":
+        # Native "last" pools the final sequence slot, not the last non-pad token.
         return x[:, -1]
     if pool_type == "eos":
         assert eos_token_id is not None
@@ -45,6 +47,16 @@ def _global_pool(
         return x[torch.arange(x.size(0), device=x.device), idx]
 
     raise ValueError(f"Unknown pool_type '{pool_type}'")
+
+
+def _combine_causal_attention_mask(attn_mask: torch.Tensor, query_len: int, key_len: int) -> torch.Tensor:
+    causal_mask = torch.ones(query_len, key_len, dtype=torch.bool, device=attn_mask.device).tril()
+    if attn_mask.dtype == torch.bool:
+        return attn_mask & causal_mask
+
+    causal_bias = torch.zeros(query_len, key_len, dtype=attn_mask.dtype, device=attn_mask.device)
+    causal_bias.masked_fill_(~causal_mask, float("-inf"))
+    return attn_mask + causal_bias
 
 
 class Attention(nn.Module):
@@ -86,13 +98,18 @@ class Attention(nn.Module):
         q = self.q_norm(q)
         k = self.k_norm(k)
 
+        is_causal = self.is_causal
+        if is_causal is True and attn_mask is not None:
+            attn_mask = _combine_causal_attention_mask(attn_mask, N, N)
+            is_causal = False
+
         x = F.scaled_dot_product_attention(  # pylint: disable=not-callable
             q,
             k,
             v,
             attn_mask=attn_mask,
             dropout_p=self.attn_drop.p if self.training else 0.0,
-            is_causal=self.is_causal,
+            is_causal=is_causal,
             scale=self.scale,
         )
         x = x.transpose(1, 2).reshape(B, N, C)
@@ -251,7 +268,7 @@ class Encoder(nn.Module):
 
 
 class TransformerEncoder(TextEncoderBaseNet):
-    block_group_regex = r"encoder\.block\.(\d+)"
+    block_group_regex: ClassVar[str] = r"encoder\.block\.(\d+)"
 
     def __init__(self, *, config: Optional[dict[str, Any]] = None, context_length: Optional[int] = None) -> None:
         super().__init__(config=config, context_length=context_length)
@@ -285,6 +302,8 @@ class TransformerEncoder(TextEncoderBaseNet):
 
         if pool_type not in ("first", "last", "eos"):
             raise ValueError(f"Unknown pool_type '{pool_type}'")
+        if class_token is True and pad_token_id is None:
+            raise ValueError("class_token=True requires pad_token_id")
 
         if norm_layer_type == "LayerNorm":
             norm_layer = nn.LayerNorm
@@ -390,7 +409,7 @@ class TransformerEncoder(TextEncoderBaseNet):
         self.encoder.set_causal_attention(is_causal)
 
     def _pad_attention_mask(self, token_ids: torch.Tensor) -> Optional[torch.Tensor]:
-        if self.causal_mask is True or self.pad_token_id is None:
+        if self.pad_token_id is None or (self.causal_mask is True and self.class_token is None):
             return None
 
         mask = token_ids.ne(self.pad_token_id)

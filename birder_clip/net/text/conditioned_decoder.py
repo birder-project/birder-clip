@@ -11,6 +11,7 @@ import logging
 from collections.abc import Callable
 from functools import partial
 from typing import Any
+from typing import ClassVar
 from typing import Optional
 
 import torch
@@ -22,7 +23,7 @@ from torch import nn
 from torch.utils.checkpoint import checkpoint_sequential
 
 from birder_clip.model_registry import registry
-from birder_clip.net.text.base import TextDecoderBaseNet
+from birder_clip.net.text.base import CrossAttentionTextDecoderBaseNet
 from birder_clip.net.text.encoder import Attention
 
 logger = logging.getLogger(__name__)
@@ -326,7 +327,7 @@ class Decoder(nn.Module):
         return target
 
 
-class ConditionedDecoder(TextDecoderBaseNet):
+class ConditionedDecoder(CrossAttentionTextDecoderBaseNet):
     """
     CoCa-style conditioned decoder
 
@@ -334,7 +335,7 @@ class ConditionedDecoder(TextDecoderBaseNet):
     token embeddings or positional embeddings.
     """
 
-    block_group_regex = r"decoder\.block\.(\d+)"
+    block_group_regex: ClassVar[str] = r"decoder\.block\.(\d+)"
 
     def __init__(self, *, config: Optional[dict[str, Any]] = None, context_length: Optional[int] = None) -> None:
         super().__init__(config=config, context_length=context_length)

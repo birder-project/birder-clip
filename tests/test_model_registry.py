@@ -9,8 +9,10 @@ from birder_clip.model_registry import Task
 from birder_clip.model_registry import registry
 from birder_clip.model_registry.model_registry import ModelRegistry
 from birder_clip.net.base import BaseNet
+from birder_clip.net.text.base import CrossAttentionTextDecoderBaseNet
 from birder_clip.net.text.base import TextDecoderBaseNet
 from birder_clip.net.text.base import TextEncoderBaseNet
+from birder_clip.net.text.base import VisualCausalTextDecoderBaseNet
 
 logging.disable(logging.CRITICAL)
 
@@ -71,6 +73,10 @@ class TestModelRegistry(unittest.TestCase):
         self.assertListEqual(model_registry.list_models(task=Task.IMAGE_TEXT), ["image_text_net"])
         self.assertListEqual(model_registry.list_models(task=Task.TEXT_ENCODER), ["text_net"])
         self.assertListEqual(model_registry.list_models(task=Task.TEXT_DECODER), ["decoder_net"])
+        self.assertListEqual(
+            model_registry.list_models(task=Task.TEXT_DECODER, net_type=TextDecoderBaseNet),
+            ["decoder_net"],
+        )
         self.assertTrue(model_registry.exists("image_text_net", task=Task.IMAGE_TEXT))
         self.assertFalse(model_registry.exists("image_text_net", task=Task.TEXT_ENCODER))
         self.assertTrue(model_registry.exists("decoder_net", task=Task.TEXT_DECODER))
@@ -89,12 +95,31 @@ class TestModelRegistry(unittest.TestCase):
         self.assertIn("clip", registry.list_models(task=Task.IMAGE_TEXT))
         self.assertIn("transformer_encoder", registry.list_models(task=Task.TEXT_ENCODER))
         self.assertIn("conditioned_decoder", registry.list_models(task=Task.TEXT_DECODER))
+        self.assertIn("visual_causal_text_decoder", registry.list_models(task=Task.TEXT_DECODER))
+        self.assertIn(
+            "conditioned_decoder",
+            registry.list_models(task=Task.TEXT_DECODER, net_type=CrossAttentionTextDecoderBaseNet),
+        )
+        self.assertIn(
+            "visual_causal_text_decoder",
+            registry.list_models(task=Task.TEXT_DECODER, net_type=VisualCausalTextDecoderBaseNet),
+        )
         self.assertIn("clip", registry.list_models())
         self.assertIn("transformer_encoder", registry.list_models())
         self.assertIn("conditioned_decoder", registry.list_models())
+        self.assertIn("visual_causal_text_decoder", registry.list_models())
         self.assertTrue(registry.exists("clip", task=Task.IMAGE_TEXT))
         self.assertTrue(registry.exists("transformer_encoder", task=Task.TEXT_ENCODER))
         self.assertTrue(registry.exists("conditioned_decoder", task=Task.TEXT_DECODER))
+        self.assertTrue(registry.exists("visual_causal_text_decoder", task=Task.TEXT_DECODER))
+        self.assertTrue(
+            registry.exists("conditioned_decoder", task=Task.TEXT_DECODER, net_type=CrossAttentionTextDecoderBaseNet)
+        )
+        self.assertTrue(
+            registry.exists(
+                "visual_causal_text_decoder", task=Task.TEXT_DECODER, net_type=VisualCausalTextDecoderBaseNet
+            )
+        )
 
     def test_model_defaults(self) -> None:
         self.assertEqual(registry.get_default_size("openvision_v1_vit_s16"), (224, 224))

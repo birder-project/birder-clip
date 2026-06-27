@@ -23,7 +23,7 @@ Full training is supported, but for large-scale CLIP pretraining you are probabl
 1. Ensure your environment meets the minimum requirements:
    - Python 3.11 or newer
    - PyTorch 2.10 or newer (installed for your hardware/driver stack)
-   - Birder 0.6.0 or newer
+   - Birder 0.6.2 or newer
 
 1. Install the latest Birder CLIP version:
 

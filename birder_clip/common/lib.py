@@ -3,14 +3,17 @@ from typing import Any
 from typing import Optional
 
 from birder.data.transforms.classification import RGBType
+from birder.version import __version__ as birder_version
 
 from birder_clip.conf import settings
 from birder_clip.model_registry import registry
 from birder_clip.net.base import BaseNet
 from birder_clip.net.base import SignatureType
-from birder_clip.version import __version__
+from birder_clip.version import __version__ as birder_clip_version
 
-MODEL_CONFIG_RESERVED_KEYS = frozenset({"image", "text", "tokenizer", "embed_dim", "embed-dim"})
+MODEL_CONFIG_RESERVED_KEYS = frozenset(
+    {"image", "text", "decoder", "tokenizer", "embed_dim", "embed-dim", "keep_ratio"}
+)
 
 
 def get_size_from_signature(signature: SignatureType) -> tuple[int, int]:
@@ -37,6 +40,7 @@ def get_image_text_network_name(
     tag: Optional[str] = None,
     image_encoder: Optional[str] = None,
     text_encoder: Optional[str] = None,
+    text_decoder: Optional[str] = None,
     embed_dim: Optional[int] = None,
     tokenizer: Optional[str] = None,
 ) -> str:
@@ -45,6 +49,8 @@ def get_image_text_network_name(
         parts.append(image_encoder)
     if text_encoder is not None and text_encoder != "transformer_encoder":
         parts.append(text_encoder)
+    if text_decoder is not None and text_decoder != "conditioned_decoder":
+        parts.append(text_decoder)
 
     if registry.exists(network) is True:
         default_tokenizer = registry.get_default_tokenizer(network)
@@ -71,10 +77,12 @@ def get_image_text_model_config(
     *,
     image_encoder: Optional[str] = None,
     text_encoder: Optional[str] = None,
+    text_decoder: Optional[str] = None,
     embed_dim: Optional[int] = None,
     tokenizer: Optional[str] = None,
     image_encoder_config: Optional[dict[str, Any]] = None,
     text_encoder_config: Optional[dict[str, Any]] = None,
+    text_decoder_config: Optional[dict[str, Any]] = None,
     input_channels: Optional[int] = None,
     image_size: Optional[tuple[int, int]] = None,
     context_length: Optional[int] = None,
@@ -86,7 +94,7 @@ def get_image_text_model_config(
 
     if config is not None:
         for key, value in config.items():
-            if key in {"image", "text"} and isinstance(value, dict):
+            if key in {"image", "text", "decoder"} and isinstance(value, dict):
                 model_config[key] = {**model_config.get(key, {}), **value}
             else:
                 model_config[key] = value
@@ -111,7 +119,7 @@ def get_image_text_model_config(
 
         model_config["image"] = image_config
 
-    if text_encoder is not None or text_encoder_config is not None or context_length is not None:
+    if text_encoder is not None or text_encoder_config is not None or "text" in model_config:
         text_config = model_config.get("text", {}).copy()
         if text_encoder is not None:
             # String encoder metadata replaces only the encoder name.
@@ -123,6 +131,17 @@ def get_image_text_model_config(
             text_config["context_length"] = context_length
 
         model_config["text"] = text_config
+
+    if text_decoder is not None or text_decoder_config is not None or "decoder" in model_config:
+        decoder_config = model_config.get("decoder", {}).copy()
+        if text_decoder is not None:
+            decoder_config["network"] = text_decoder
+        if text_decoder_config is not None:
+            decoder_config["config"] = {**decoder_config.get("config", {}), **text_decoder_config}
+        if context_length is not None:
+            decoder_config["context_length"] = context_length
+
+        model_config["decoder"] = decoder_config
 
     if embed_dim is not None:
         model_config["embed_dim"] = embed_dim
@@ -143,7 +162,8 @@ def get_image_text_network_config(net: BaseNet, signature: SignatureType, rgb_st
         model_config = net.config
 
     return {
-        "birder_clip_version": __version__,
+        "birder_clip_version": birder_clip_version,
+        "birder_version": birder_version,
         "name": model_name,
         "registered_name": registered_name,
         "task": net.task,

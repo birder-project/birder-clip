@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 from typing import NamedTuple
 from typing import Optional
+from typing import TypeAlias
 
 import torch
 from birder.common import cli
@@ -16,8 +17,10 @@ from birder.data.transforms.classification import inference_preset
 from birder_clip.common import lib
 from birder_clip.model_registry import Task
 from birder_clip.model_registry import registry
-from birder_clip.model_registry.manifest import EncoderMetadataType
 from birder_clip.model_registry.manifest import FileFormatType
+from birder_clip.model_registry.manifest import ImageEncoderMetadataType
+from birder_clip.model_registry.manifest import TextDecoderMetadataType
+from birder_clip.model_registry.manifest import TextEncoderMetadataType
 from birder_clip.net.base import BaseNet
 from birder_clip.net.base import SignatureType
 from birder_clip.tokenizers import Tokenizer
@@ -36,6 +39,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+ComponentMetadataType: TypeAlias = ImageEncoderMetadataType | TextEncoderMetadataType | TextDecoderMetadataType
+
 
 class ModelInfo(NamedTuple):
     signature: SignatureType
@@ -51,16 +56,18 @@ def write_config(network_name: str, net: BaseNet, signature: SignatureType, rgb_
         json.dump(model_config, handle, indent=2)
 
 
-def _split_encoder_metadata(encoder: Optional[EncoderMetadataType]) -> tuple[Optional[str], Optional[dict[str, Any]]]:
-    if encoder is None:
+def _split_component_metadata(
+    component: Optional[ComponentMetadataType],
+) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+    if component is None:
         return (None, None)
-    if isinstance(encoder, str):
-        return (encoder, None)
+    if isinstance(component, str):
+        return (component, None)
 
-    if "network" not in encoder:
-        raise ValueError("Encoder metadata must include a 'network' field")
+    if "network" not in component:
+        raise ValueError("Component metadata must include a 'network' field")
 
-    return (None, encoder)  # type: ignore[return-value]
+    return (None, component)  # type: ignore[return-value]
 
 
 def model_path(
@@ -286,10 +293,12 @@ def load_checkpoint(
     tag: Optional[str] = None,
     image_encoder: Optional[str] = None,
     text_encoder: Optional[str] = None,
+    text_decoder: Optional[str] = None,
     embed_dim: Optional[int] = None,
     tokenizer: Optional[str] = None,
     image_encoder_config: Optional[dict[str, Any]] = None,
     text_encoder_config: Optional[dict[str, Any]] = None,
+    text_decoder_config: Optional[dict[str, Any]] = None,
     epoch: Optional[int] = None,
     new_size: Optional[tuple[int, int]] = None,
     new_context_length: Optional[int] = None,
@@ -300,6 +309,7 @@ def load_checkpoint(
         tag=tag,
         image_encoder=image_encoder,
         text_encoder=text_encoder,
+        text_decoder=text_decoder,
         embed_dim=embed_dim,
         tokenizer=tokenizer,
     )
@@ -329,10 +339,12 @@ def load_checkpoint(
         checkpoint_config,
         image_encoder=image_encoder,
         text_encoder=text_encoder,
+        text_decoder=text_decoder,
         embed_dim=embed_dim,
         tokenizer=tokenizer,
         image_encoder_config=image_encoder_config,
         text_encoder_config=text_encoder_config,
+        text_decoder_config=text_decoder_config,
         input_channels=input_channels,
         image_size=size,
         context_length=context_length,
@@ -364,10 +376,12 @@ def load_model(
     tag: Optional[str] = None,
     image_encoder: Optional[str] = None,
     text_encoder: Optional[str] = None,
+    text_decoder: Optional[str] = None,
     embed_dim: Optional[int] = None,
     tokenizer: Optional[str] = None,
     image_encoder_config: Optional[dict[str, Any]] = None,
     text_encoder_config: Optional[dict[str, Any]] = None,
+    text_decoder_config: Optional[dict[str, Any]] = None,
     epoch: Optional[int] = None,
     new_size: Optional[tuple[int, int]] = None,
     new_context_length: Optional[int] = None,
@@ -381,6 +395,7 @@ def load_model(
             tag=tag,
             image_encoder=image_encoder,
             text_encoder=text_encoder,
+            text_decoder=text_decoder,
             embed_dim=embed_dim,
             tokenizer=tokenizer,
         )
@@ -420,10 +435,12 @@ def load_model(
         checkpoint_config,
         image_encoder=image_encoder,
         text_encoder=text_encoder,
+        text_decoder=text_decoder,
         embed_dim=embed_dim,
         tokenizer=tokenizer,
         image_encoder_config=image_encoder_config,
         text_encoder_config=text_encoder_config,
+        text_decoder_config=text_decoder_config,
         input_channels=input_channels,
         image_size=size,
         context_length=context_length,
@@ -525,15 +542,17 @@ def load_pretrained_model(
     if model_metadata["task"] != Task.IMAGE_TEXT:
         raise ValueError(f"Unknown model type: {model_metadata['task']}")
 
-    image_encoder, image_config = _split_encoder_metadata(model_metadata["net"].get("image_encoder", None))
-    text_encoder, text_config = _split_encoder_metadata(model_metadata["net"].get("text_encoder", None))
+    image_encoder, image_config = _split_component_metadata(model_metadata["net"].get("image_encoder", None))
+    text_encoder, text_config = _split_component_metadata(model_metadata["net"].get("text_encoder", None))
+    text_decoder, decoder_config = _split_component_metadata(model_metadata["net"].get("text_decoder", None))
 
     pretrained_config: dict[str, Any] = {}
     if image_config is not None:
         pretrained_config["image"] = image_config
-
     if text_config is not None:
         pretrained_config["text"] = text_config
+    if decoder_config is not None:
+        pretrained_config["decoder"] = decoder_config
 
     if custom_config is not None:
         pretrained_config.update(custom_config)
@@ -550,6 +569,7 @@ def load_pretrained_model(
         tag=model_metadata["net"].get("tag", None),
         image_encoder=image_encoder,
         text_encoder=text_encoder,
+        text_decoder=text_decoder,
         embed_dim=model_metadata["net"].get("embed_dim", None),
         tokenizer=model_metadata["net"].get("tokenizer", None),
         inference=inference,
