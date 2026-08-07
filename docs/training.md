@@ -32,8 +32,10 @@ torchrun --nproc_per_node=2 -m birder_clip.scripts.train --network clip --image-
 #### CoCa: ViT b16, text transformer, d512
 
 ```sh
-torchrun --nproc_per_node=2 -m birder_clip.scripts.train --network coca --image-encoder vit_b16 --text-encoder transformer_encoder --embed-dim 512 --loss coca --coca-caption-loss-weight 2.0 --batch-size 256 --opt adamw --opt-fused --opt-eps 1e-6 --opt-betas 0.9 0.98 --lr 0.001 --lr-scheduler cosine --epochs 200 --warmup-epochs 5 --size 192 --context-length 32 --aug-type clip --clip-gray-prob 0.2 --rgb-mode clip --amp --amp-dtype bfloat16 --compile --data-path data/training.csv
+torchrun --nproc_per_node=2 -m birder_clip.scripts.train --network coca --image-encoder vit_b16 --text-encoder transformer_encoder --text-encoder-config '{"pad_token_id": 0}' --embed-dim 512 --loss coca --coca-caption-loss-weight 2.0 --batch-size 256 --opt adamw --opt-fused --opt-eps 1e-6 --opt-betas 0.9 0.98 --lr 0.001 --lr-scheduler cosine --epochs 200 --warmup-epochs 5 --size 192 --context-length 32 --aug-type clip --clip-gray-prob 0.2 --rgb-mode clip --amp --amp-dtype bfloat16 --compile --data-path data/training.csv
 ```
+
+The text encoder `pad_token_id` must match the tokenizer. The default `simple_tokenizer` uses `0`.
 
 For caption-only fine-tuning from a pretrained CoCa checkpoint, disable the contrastive loss and use a lower learning rate, e.g. `--coca-contrastive-loss-weight 0.0 --lr 1e-5`.
 

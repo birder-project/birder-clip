@@ -369,7 +369,14 @@ def add_dataloader_args(parser: argparse.ArgumentParser) -> None:
 
 
 def add_precision_args(parser: argparse.ArgumentParser) -> None:
-    group = parser.add_argument_group("Precision parameters")
+    group = parser.add_argument_group("Device and precision parameters")
+    group.add_argument(
+        "--device",
+        type=str,
+        choices=["cuda", "cpu"],
+        default="cuda",
+        help="device to use for training",
+    )
     group.add_argument(
         "--model-dtype",
         type=str,
@@ -570,7 +577,6 @@ def add_logging_and_debug_args(parser: argparse.ArgumentParser, default_log_inte
     group.add_argument(
         "--seed", type=int, help="set random seed for better reproducibility (affects torch, numpy and random)"
     )
-    group.add_argument("--cpu", default=False, action="store_true", help="use cpu (mostly for testing)")
     group.add_argument(
         "--use-fake-data",
         default=False,
@@ -705,8 +711,8 @@ def common_args_validation(args: argparse.Namespace) -> None:
             raise cli.ValidationError("--compile-opt cannot be used with --distributed-mode fsdp")
         if args.compile_fullgraph is True:
             raise cli.ValidationError("--compile-fullgraph cannot be used with --distributed-mode fsdp")
-        if args.cpu is True:
-            raise cli.ValidationError("--cpu cannot be used with --distributed-mode fsdp")
+        if torch.device(args.device).type == "cpu":
+            raise cli.ValidationError("--device cpu cannot be used with --distributed-mode fsdp")
         if args.model_ema is True:
             raise cli.ValidationError("--model-ema cannot be used with --distributed-mode fsdp")
         if args.fsdp_wrap_policy == "min-num-params" and args.fsdp_wrap_min_num_params is None:

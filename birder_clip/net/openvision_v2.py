@@ -46,7 +46,7 @@ class OpenVision_v2(BaseNet, CaptionGeneratorMixin):
             config=image_config.get("config", None),
             size=image_config.get("size", None),
         )
-        image_encoder.transform_to_backbone()
+        image_encoder.strip_for_forward_features()
 
         decoder_model_config = {
             "kv_dim": image_encoder.feature_dim,
@@ -68,6 +68,9 @@ class OpenVision_v2(BaseNet, CaptionGeneratorMixin):
         self.keep_ratio: float = self.config.get("keep_ratio", 0.35)
         self.embedding_size = text_decoder.hidden_dim
         self.tokenizer_name = tokenizer_name
+
+    def get_signature_output_shape(self) -> tuple[int, ...]:
+        return (0, 0, self.text_decoder.vocab_size)
 
     def set_grad_checkpointing(
         self,

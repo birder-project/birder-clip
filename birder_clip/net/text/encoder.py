@@ -18,6 +18,7 @@ import torch.nn.functional as F
 from birder.layers import FFN
 from birder.layers import LayerScale
 from birder.layers.activations import get_activation_module
+from birder.net.base import stochastic_depth_rates
 from torch import nn
 from torch.utils.checkpoint import checkpoint_sequential
 from torchvision.ops import StochasticDepth
@@ -337,7 +338,7 @@ class TransformerEncoder(TextEncoderBaseNet):
 
         self.pos_embedding = nn.Parameter(torch.empty(1, seq_length, hidden_dim).normal_(std=0.01))
 
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, num_layers)]
+        dpr = stochastic_depth_rates(drop_path_rate, num_layers)
         self.encoder = Encoder(
             num_layers,
             num_heads,

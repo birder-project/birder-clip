@@ -33,6 +33,29 @@ def config_export(net: torch.nn.Module, signature: SignatureType, rgb_stats: RGB
         json.dump(model_config, handle, indent=2)
 
 
+def add_image_encoder_head_bias(net: torch.nn.Module) -> None:
+    classifier = net.image_encoder.classifier
+    if isinstance(classifier, torch.nn.Linear) is False:
+        raise TypeError(f"Expected Linear image encoder classifier, got {type(classifier).__name__}")
+    if classifier.bias is not None:
+        return
+
+    export_classifier = net.image_encoder.create_classifier(head_bias=True)
+    if isinstance(export_classifier, torch.nn.Linear) is False:
+        raise TypeError(f"Expected Linear export classifier, got {type(export_classifier).__name__}")
+    if export_classifier.bias is None:
+        raise RuntimeError("Export classifier was created without bias")
+
+    export_classifier.to(classifier.weight)
+    with torch.no_grad():
+        export_classifier.weight.copy_(classifier.weight)
+        export_classifier.bias.zero_()
+
+    export_classifier.requires_grad_(classifier.weight.requires_grad)
+    export_classifier.train(classifier.training)
+    net.image_encoder.classifier = export_classifier
+
+
 def image_encoder_export(
     net: torch.nn.Module,
     network_name: str,
@@ -41,7 +64,11 @@ def image_encoder_export(
     rgb_stats: RGBType,
     image_encoder_config: Optional[dict[str, Any]],
     class_to_idx: Optional[dict[str, int]] = None,
+    add_head_bias: bool = False,
 ) -> None:
+    if add_head_bias is True:
+        add_image_encoder_head_bias(net)
+
     if class_to_idx is None:
         class_to_idx = {str(idx): idx for idx in range(net.image_encoder.num_classes)}
 
@@ -96,6 +123,7 @@ def set_image_encoder_classification_head(
     templates: list[str],
     context_length: Optional[int],
     text_batch_size: Optional[int],
+    add_head_bias: bool = False,
 ) -> None:
     device = torch.device("cpu")
     tokenizer = get_tokenizer(tokenizer_name, context_length=context_length)
@@ -149,6 +177,9 @@ def set_image_encoder_classification_head(
             head_bias = head_bias + logit_bias
 
     net.image_encoder.reset_classifier(len(class_names))
+    if add_head_bias is True:
+        add_image_encoder_head_bias(net)
+
     with torch.no_grad():
         net.image_encoder.classifier.weight.copy_(head_weight.to(dtype=net.image_encoder.classifier.weight.dtype))
         if net.image_encoder.classifier.bias is not None:
@@ -407,8 +438,21 @@ def main(args: argparse.Namespace) -> None:
     elif args.image_encoder_only is True or args.image_classifier is True:
         image_encoder_config = {}
         registered_image_config = registered_config.get("image", {})
+        registered_image_encoder_config = {}
+        registered_image_encoder = None
         if isinstance(registered_image_config, dict):
-            image_encoder_config.update(registered_image_config.get("config", {}))
+            registered_image_encoder = registered_image_config.get("network")
+            registered_image_encoder_config_value = registered_image_config.get("config", {})
+            if isinstance(registered_image_encoder_config_value, dict):
+                registered_image_encoder_config = registered_image_encoder_config_value
+                image_encoder_config.update(registered_image_encoder_config)
+
+        selected_image_config = net.config.get("image", {}) if net.config is not None else {}
+        uses_registered_image_encoder = (
+            registered_image_encoder is not None
+            and isinstance(selected_image_config, dict)
+            and selected_image_config.get("network") == registered_image_encoder
+        )
 
         if model_info.custom_config is not None:
             custom_image_config = model_info.custom_config.get("image", {})
@@ -417,6 +461,16 @@ def main(args: argparse.Namespace) -> None:
 
         if args.image_encoder_config is not None:
             image_encoder_config.update(args.image_encoder_config)
+
+        add_head_bias = (
+            uses_registered_image_encoder is True
+            and registered_image_encoder_config.get("head_bias") is False
+            and image_encoder_config.get("head_bias") is False
+            and isinstance(net.image_encoder.classifier, torch.nn.Linear)
+        )
+        if add_head_bias is True:
+            image_encoder_config.pop("head_bias")
+
         if len(image_encoder_config) == 0:
             image_encoder_config = None  # type: ignore[assignment]
 
@@ -432,6 +486,7 @@ def main(args: argparse.Namespace) -> None:
                 get_templates(args),
                 context_length,
                 args.text_batch_size,
+                add_head_bias=add_head_bias,
             )
 
         image_encoder_export(
@@ -442,4 +497,5 @@ def main(args: argparse.Namespace) -> None:
             model_info.rgb_stats,
             image_encoder_config,
             class_to_idx,
+            add_head_bias=add_head_bias,
         )

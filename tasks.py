@@ -223,7 +223,7 @@ def model_pre_publish(
     num_params = sum(p.numel() for p in net.parameters())
     num_params = round(num_params / 1_000_000, 1)
     size = lib.get_size_from_signature(model_info.signature)
-    context_length = net.text_encoder.context_length
+    context_length = lib.get_context_length_from_signature(model_info.signature)
 
     # Check if model already in manifest
     if registry.pretrained_exists(network_name) is True:

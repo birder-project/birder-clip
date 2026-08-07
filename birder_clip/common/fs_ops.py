@@ -10,6 +10,7 @@ from typing import TypeAlias
 
 import torch
 from birder.common import cli
+from birder.common import lib as birder_lib
 from birder.conf import settings
 from birder.data.transforms.classification import RGBType
 from birder.data.transforms.classification import inference_preset
@@ -259,24 +260,33 @@ def checkpoint_model_from_state_dicts(
     )
 
 
-def clean_checkpoints(network_name: str, keep_last: int) -> None:
+def list_checkpoints(network_name: str, *, states: bool = False) -> list[Path]:
     epoch = "*[0-9]"
-    models_glob = str(model_path(network_name, epoch=epoch))
-    states_glob = str(model_path(network_name, epoch=epoch, states=True))
-    model_pattern = re.compile(r".*_([1-9][0-9]*)\.pt$")
-    states_pattern = re.compile(r".*_([1-9][0-9]*)_states\.pt$")
+    checkpoint_glob = model_path(network_name, epoch=epoch, states=states).name
+    escaped_network_name = re.escape(network_name)
+    if states is True:
+        checkpoint_pattern = re.compile(rf"^{escaped_network_name}_[1-9][0-9]*_states\.pt$")
+    else:
+        checkpoint_pattern = re.compile(rf"^{escaped_network_name}_[1-9][0-9]*\.pt$")
 
-    model_paths = list(settings.BASE_DIR.glob(models_glob))
-    for p in sorted(model_paths, key=lambda p: p.stat().st_mtime)[:-keep_last]:
-        if model_pattern.search(str(p)) is not None:
-            logger.info(f"Removing checkpoint {p}...")
-            p.unlink()
+    checkpoint_paths = [
+        p for p in settings.MODELS_DIR.glob(checkpoint_glob) if checkpoint_pattern.fullmatch(p.name) is not None
+    ]
+    return sorted(checkpoint_paths, key=lambda p: p.stat().st_mtime)
 
-    state_paths = list(settings.BASE_DIR.glob(states_glob))
-    for p in sorted(state_paths, key=lambda p: p.stat().st_mtime)[:-keep_last]:
-        if states_pattern.search(str(p)) is not None:
-            logger.info(f"Removing checkpoint states {p}...")
-            p.unlink()
+
+def clean_checkpoints(network_name: str, keep_last: int) -> None:
+    if keep_last < 1:
+        raise ValueError(f"keep_last must be greater than or equal to 1, got {keep_last}")
+
+    for p in list_checkpoints(network_name)[:-keep_last]:
+        logger.info(f"Removing checkpoint {p}...")
+        p.unlink()
+
+        states_path = p.with_name(f"{p.stem}_states{p.suffix}")
+        if states_path.exists() is True:
+            logger.info(f"Removing checkpoint states {states_path}...")
+            states_path.unlink()
 
 
 class CheckpointStates(NamedTuple):
@@ -448,7 +458,7 @@ def load_model(
 
     net = registry.net_factory(network, config=model_config)
     if st is True:
-        model_state: dict[str, Any] = safetensors.torch.load_file(path, device=device.type)
+        model_state: dict[str, Any] = safetensors.torch.load_file(path, device=birder_lib.device_to_str(device))
         net.load_state_dict(model_state)
     else:
         net.load_state_dict(model_dict["state"])

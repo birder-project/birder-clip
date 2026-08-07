@@ -22,13 +22,15 @@ DataShapeType = TypedDict("DataShapeType", {"data_shape": list[int]})
 SignatureType = TypedDict("SignatureType", {"inputs": list[DataShapeType], "outputs": list[DataShapeType]})
 
 
-def get_image_text_signature(input_shape: tuple[int, ...], context_length: int) -> SignatureType:
+def get_image_text_signature(
+    input_shape: tuple[int, ...], context_length: int, *, output_shape: tuple[int, ...] = (0, 0)
+) -> SignatureType:
     return {
         "inputs": [
             {"data_shape": [0, *input_shape[1:]]},
             {"data_shape": [0, context_length]},
         ],
-        "outputs": [{"data_shape": [0, 0]}],
+        "outputs": [{"data_shape": list(output_shape)}],
     }
 
 
@@ -52,6 +54,9 @@ class BaseNet(nn.Module):
         self.text_decoder: Optional[TextDecoderBaseNet] = None
         self.embedding_size: int
         self.tokenizer_name: str
+
+    def get_signature_output_shape(self) -> tuple[int, ...]:
+        return (0, 0)
 
     def set_grad_checkpointing(
         self,
@@ -178,6 +183,10 @@ class _HFGenerationWrapper(nn.Module, GenerationMixin):
     @property
     def device(self) -> torch.device:
         return self.generation_device
+
+    def get_experts_implementation(self) -> dict[str, None]:
+        # GenerationMixin expects this PreTrainedModel hook, but the wrapper has no MoE layers
+        return {"": None}
 
     def _validate_generated_length(
         self, generation_config: GenerationConfig, input_ids_length: int, has_default_max_length: bool

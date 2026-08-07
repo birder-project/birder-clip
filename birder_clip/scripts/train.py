@@ -238,7 +238,7 @@ def train(args: argparse.Namespace) -> None:
     # Data loaders and samplers
     virtual_epoch_mode = args.steps_per_epoch is not None
     train_sampler, validation_sampler = training_utils.get_samplers(
-        args, training_dataset, validation_dataset, infinite=virtual_epoch_mode
+        args, training_dataset, validation_dataset, device=device, infinite=virtual_epoch_mode
     )
 
     if args.wds is True:
@@ -430,7 +430,11 @@ def train(args: argparse.Namespace) -> None:
                     f"but pretrained image encoder checkpoint was saved with {pretrained_image_info.rgb_stats}"
                 )
 
-            pretrained_image_encoder.reset_classifier(net.embedding_size)
+            if isinstance(net, CaptionGeneratorMixin):
+                pretrained_image_encoder.strip_for_forward_features()
+            else:
+                pretrained_image_encoder.reset_classifier(net.embedding_size)
+
             net.image_encoder = pretrained_image_encoder
 
     if args.loss == "clip":
@@ -474,7 +478,7 @@ def train(args: argparse.Namespace) -> None:
 
     if fsdp_mode is True:
         fsdp_wrap_modules = _image_text_fsdp_wrap_modules(net, args)
-        net = fsdp_utils.setup_fsdp(net, args, wrap_modules=fsdp_wrap_modules)
+        net = fsdp_utils.setup_fsdp(net, args, device, wrap_modules=fsdp_wrap_modules)
 
     # Compile network
     if args.compile is True:
@@ -536,7 +540,7 @@ def train(args: argparse.Namespace) -> None:
         optimizer.step = torch.compile(optimizer.step, fullgraph=False)
 
     # Gradient scaler and AMP related tasks
-    scaler, amp_dtype = training_utils.get_amp_scaler(args.amp, args.amp_dtype)
+    scaler, amp_dtype = training_utils.get_amp_scaler(device, args.amp, args.amp_dtype)
 
     # Load states
     if args.load_states is True:
@@ -592,7 +596,7 @@ def train(args: argparse.Namespace) -> None:
     if args.distributed is True and fsdp_mode is False:
         net = torch.nn.parallel.DistributedDataParallel(
             net,
-            device_ids=[args.local_rank],
+            device_ids=training_utils.get_ddp_device_ids(device, device_id),
             find_unused_parameters=args.find_unused_parameters,
             broadcast_buffers=not args.no_broadcast_buffers,
         )
@@ -654,7 +658,9 @@ def train(args: argparse.Namespace) -> None:
     logger.info(f"Logging training run at {training_log_path}")
     summary_writer = SummaryWriter(training_log_path)
 
-    signature = get_image_text_signature(sample_shape, tokenizer.context_length)
+    signature = get_image_text_signature(
+        sample_shape, tokenizer.context_length, output_shape=net_for_info.get_signature_output_shape()
+    )
     file_handler: logging.Handler = logging.NullHandler()
     if training_utils.is_global_primary(args) is True:
         summary_writer.flush()
@@ -735,7 +741,7 @@ def train(args: argparse.Namespace) -> None:
                     fsdp_utils.broadcast_module_buffers(net)
 
                 with torch.no_grad():
-                    with torch.amp.autocast("cuda", enabled=args.amp, dtype=amp_dtype):
+                    with torch.amp.autocast(device.type, enabled=args.amp, dtype=amp_dtype):
                         model_out = net(images, texts, return_features=True)
                         accum_features["image_features"].append(model_out["image_features"])
                         accum_features["text_features"].append(model_out["text_features"])
@@ -756,7 +762,7 @@ def train(args: argparse.Namespace) -> None:
                         fsdp_utils.broadcast_module_buffers(net)
 
                     with sync_context():
-                        with torch.amp.autocast("cuda", enabled=args.amp, dtype=amp_dtype):
+                        with torch.amp.autocast(device.type, enabled=args.amp, dtype=amp_dtype):
                             model_out = net(accum_images, accum_texts, return_features=True)
                             image_features = torch.concat(
                                 accum_features["image_features"][:j]
@@ -806,7 +812,7 @@ def train(args: argparse.Namespace) -> None:
 
                 # Forward and backward
                 with sync_context():
-                    with torch.amp.autocast("cuda", enabled=args.amp, dtype=amp_dtype):
+                    with torch.amp.autocast(device.type, enabled=args.amp, dtype=amp_dtype):
                         model_out = net(images, texts, return_features=True)
                         if args.loss == "coca":
                             losses = criterion(
@@ -941,7 +947,7 @@ def train(args: argparse.Namespace) -> None:
                     images = images.to(device, dtype=model_dtype, non_blocking=True)
                     texts = texts.to(device, non_blocking=True)
 
-                    with torch.amp.autocast("cuda", enabled=args.amp, dtype=amp_dtype):
+                    with torch.amp.autocast(device.type, enabled=args.amp, dtype=amp_dtype):
                         model_out = eval_model(images, texts, return_features=True)
                         if args.loss == "coca":
                             losses = criterion(

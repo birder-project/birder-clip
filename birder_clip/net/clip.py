@@ -124,7 +124,7 @@ registry.register_model_config(
     config={
         "image": {
             "network": "vit_b16_pn_quick_gelu",
-            "config": {"drop_path_rate": 0.0},
+            "config": {"drop_path_rate": 0.0, "head_bias": False},
             "size": (224, 224),
         },
         "text": {
@@ -143,6 +143,7 @@ registry.register_model_config(
     config={
         "image": {
             "network": "vit_l14_pn_quick_gelu",
+            "config": {"head_bias": False},
             "size": (224, 224),
         },
         "text": {
@@ -166,6 +167,7 @@ registry.register_model_config(
     config={
         "image": {
             "network": "vit_l14_pn",
+            "config": {"head_bias": False},
             "size": (224, 224),
         },
         "text": {
@@ -188,6 +190,7 @@ registry.register_model_config(
     config={
         "image": {
             "network": "vit_h14_pn",
+            "config": {"head_bias": False},
             "size": (224, 224),
         },
         "text": {
@@ -211,7 +214,7 @@ registry.register_model_config(
     config={
         "image": {
             "network": "convnext_v1_base",
-            "config": {"drop_path_rate": 0.1},
+            "config": {"drop_path_rate": 0.1, "head_bias": False},
             "size": (320, 320),
         },
         "text": {
@@ -234,7 +237,7 @@ registry.register_model_config(
     config={
         "image": {
             "network": "vit_reg1_s16_nap_avg",
-            "config": {"drop_path_rate": 0.0},
+            "config": {"drop_path_rate": 0.0, "head_bias": False},
             "size": (224, 224),
         },
         "text": {
@@ -258,7 +261,7 @@ registry.register_model_config(
     config={
         "image": {
             "network": "vit_reg1_b16_nap_avg",
-            "config": {"drop_path_rate": 0.0},
+            "config": {"drop_path_rate": 0.0, "head_bias": False},
             "size": (384, 384),
         },
         "text": {
@@ -282,7 +285,7 @@ registry.register_model_config(
     config={
         "image": {
             "network": "vit_reg1_l14_nap_avg",
-            "config": {"drop_path_rate": 0.0},
+            "config": {"drop_path_rate": 0.0, "head_bias": False},
             "size": (224, 224),
         },
         "text": {
@@ -547,7 +550,7 @@ registry.register_model_config(
     config={
         "image": {
             "network": "vit_b16_pn_quick_gelu",
-            "config": {"drop_path_rate": 0.0},
+            "config": {"drop_path_rate": 0.0, "head_bias": False},
             "size": (224, 224),
         },
         "text": {
@@ -566,7 +569,7 @@ registry.register_model_config(
     config={
         "image": {
             "network": "vit_l14_pn_quick_gelu",
-            "config": {"drop_path_rate": 0.0},
+            "config": {"drop_path_rate": 0.0, "head_bias": False},
             "size": (224, 224),
         },
         "text": {
@@ -613,7 +616,7 @@ registry.register_model_config(
     config={
         "image": {
             "network": "vit_b16_pn_quick_gelu",
-            "config": {"drop_path_rate": 0.0},
+            "config": {"drop_path_rate": 0.0, "head_bias": False},
             "size": (224, 224),
         },
         "text": {
@@ -634,6 +637,7 @@ registry.register_model_config(
     config={
         "image": {
             "network": "vit_b16_pn",
+            "config": {"head_bias": False},
             "size": (384, 384),
         },
         "text": {
@@ -653,6 +657,7 @@ registry.register_model_config(
     config={
         "image": {
             "network": "vit_l14_pn",
+            "config": {"head_bias": False},
             "size": (224, 224),
         },
         "text": {
@@ -677,6 +682,7 @@ registry.register_model_config(
     config={
         "image": {
             "network": "vit_b16_pn",
+            "config": {"head_bias": False},
             "size": (224, 224),
         },
         "text": {
@@ -694,6 +700,7 @@ registry.register_model_config(
     config={
         "image": {
             "network": "vit_l14_pn",
+            "config": {"head_bias": False},
             "size": (224, 224),
         },
         "text": {
@@ -716,6 +723,7 @@ registry.register_model_config(
     config={
         "image": {
             "network": "vit_h14_pn",
+            "config": {"head_bias": False},
             "size": (224, 224),
         },
         "text": {

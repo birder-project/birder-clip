@@ -4,6 +4,7 @@ from typing import Optional
 
 import torch
 from birder.layers.activations import get_activation_module
+from birder.net.base import stochastic_depth_rates
 from torch import nn
 
 from birder_clip.model_registry import registry
@@ -59,7 +60,7 @@ class VisualCausalTextDecoder(VisualCausalTextDecoderBaseNet):
         self.pos_embedding = nn.Parameter(torch.empty(1, self.context_length, hidden_dim))
         self.image_projection = nn.Linear(kv_dim, hidden_dim, bias=image_projection_bias)
 
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, num_layers)]
+        dpr = stochastic_depth_rates(drop_path_rate, num_layers)
         self.decoder = Encoder(
             num_layers,
             num_heads,

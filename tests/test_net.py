@@ -172,6 +172,42 @@ class TestCLIP(unittest.TestCase):
 
     @parameterized.expand(CLIP_TEST_CASES)  # type: ignore[untyped-decorator]
     @unittest.skipUnless(env_bool("SLOW_TESTS"), "Avoid slow tests")
+    def test_net_meta(self, image_encoder: str, text_encoder: str, text_config: dict[str, Any]) -> None:
+        with torch.device("meta"):
+            meta_net = registry.net_factory(
+                "clip",
+                config={
+                    "image": {
+                        "network": image_encoder,
+                        "input_channels": DEFAULT_NUM_CHANNELS,
+                        "size": TEST_IMAGE_SIZE,
+                    },
+                    "text": {
+                        "network": text_encoder,
+                        "config": {
+                            "vocab_size": TEST_VOCAB_SIZE,
+                            "eos_token_id": TEST_EOS_TOKEN_ID,
+                            **text_config,
+                        },
+                        "context_length": TEST_CONTEXT_LENGTH,
+                    },
+                    "embed_dim": TEST_EMBED_DIM,
+                    "tokenizer": "simple_tokenizer",
+                },
+            )
+
+        non_meta_tensors = [
+            f"parameter '{name}': {parameter.device}"
+            for name, parameter in meta_net.named_parameters()
+            if parameter.is_meta is False
+        ]
+        non_meta_tensors.extend(
+            f"buffer '{name}': {buffer.device}" for name, buffer in meta_net.named_buffers() if buffer.is_meta is False
+        )
+        self.assertListEqual(non_meta_tensors, [])
+
+    @parameterized.expand(CLIP_TEST_CASES)  # type: ignore[untyped-decorator]
+    @unittest.skipUnless(env_bool("SLOW_TESTS"), "Avoid slow tests")
     def test_net_backward(self, image_encoder: str, text_encoder: str, text_config: dict[str, Any]) -> None:
         batch_size = 2
         n = registry.net_factory(
@@ -410,6 +446,57 @@ class TestCoCa(unittest.TestCase):
         # Ensure model is copyable
         n_copy = copy.deepcopy(n)
         self.assertIsNotNone(n_copy)
+
+    @parameterized.expand(COCA_TEST_CASES)  # type: ignore[untyped-decorator]
+    @unittest.skipUnless(env_bool("SLOW_TESTS"), "Avoid slow tests")
+    def test_net_meta(self, image_encoder: str, text_encoder: str, text_config: dict[str, Any]) -> None:
+        with torch.device("meta"):
+            meta_net = registry.net_factory(
+                "coca",
+                config={
+                    "image": {
+                        "network": image_encoder,
+                        "input_channels": DEFAULT_NUM_CHANNELS,
+                        "size": TEST_IMAGE_SIZE,
+                    },
+                    "text": {
+                        "network": text_encoder,
+                        "config": {
+                            "vocab_size": TEST_VOCAB_SIZE,
+                            "eos_token_id": TEST_EOS_TOKEN_ID,
+                            "class_token": True,
+                            "norm_after_pool": True,
+                            "pad_token_id": 0,
+                            **text_config,
+                        },
+                        "context_length": TEST_CONTEXT_LENGTH,
+                    },
+                    "decoder": {
+                        "network": "conditioned_decoder",
+                        "config": {
+                            "num_heads": 6,
+                            "num_layers": 2,
+                        },
+                        "context_length": TEST_CONTEXT_LENGTH,
+                    },
+                    "visual_pool": {
+                        "num_heads": 6,
+                        "latent_len": 8,
+                    },
+                    "embed_dim": TEST_EMBED_DIM,
+                    "tokenizer": "simple_tokenizer",
+                },
+            )
+
+        non_meta_tensors = [
+            f"parameter '{name}': {parameter.device}"
+            for name, parameter in meta_net.named_parameters()
+            if parameter.is_meta is False
+        ]
+        non_meta_tensors.extend(
+            f"buffer '{name}': {buffer.device}" for name, buffer in meta_net.named_buffers() if buffer.is_meta is False
+        )
+        self.assertListEqual(non_meta_tensors, [])
 
     @parameterized.expand(COCA_TEST_CASES)  # type: ignore[untyped-decorator]
     @unittest.skipUnless(env_bool("SLOW_TESTS"), "Avoid slow tests")
@@ -733,6 +820,44 @@ class TestOpenVisionV2(unittest.TestCase):
         # Ensure model is copyable
         n_copy = copy.deepcopy(n)
         self.assertIsNotNone(n_copy)
+
+    @parameterized.expand(OPENVISION_V2_TEST_CASES)  # type: ignore[untyped-decorator]
+    @unittest.skipUnless(env_bool("SLOW_TESTS"), "Avoid slow tests")
+    def test_net_meta(self, image_encoder: str) -> None:
+        with torch.device("meta"):
+            meta_net = registry.net_factory(
+                "openvision_v2",
+                config={
+                    "image": {
+                        "network": image_encoder,
+                        "input_channels": DEFAULT_NUM_CHANNELS,
+                        "size": TEST_IMAGE_SIZE,
+                    },
+                    "decoder": {
+                        "network": "visual_causal_text_decoder",
+                        "config": {
+                            "vocab_size": TEST_VOCAB_SIZE,
+                            "hidden_dim": 192,
+                            "num_heads": 3,
+                            "num_layers": 2,
+                            "mlp_dim": 768,
+                        },
+                        "context_length": TEST_CONTEXT_LENGTH,
+                    },
+                    "keep_ratio": 1.0,
+                    "tokenizer": "simple_tokenizer",
+                },
+            )
+
+        non_meta_tensors = [
+            f"parameter '{name}': {parameter.device}"
+            for name, parameter in meta_net.named_parameters()
+            if parameter.is_meta is False
+        ]
+        non_meta_tensors.extend(
+            f"buffer '{name}': {buffer.device}" for name, buffer in meta_net.named_buffers() if buffer.is_meta is False
+        )
+        self.assertListEqual(non_meta_tensors, [])
 
     @parameterized.expand(OPENVISION_V2_TEST_CASES)  # type: ignore[untyped-decorator]
     @unittest.skipUnless(env_bool("SLOW_TESTS"), "Avoid slow tests")

@@ -1,3 +1,4 @@
+import logging
 from typing import Any
 from typing import Literal
 from typing import Optional
@@ -9,6 +10,8 @@ from transformers import AutoModel
 
 from birder_clip.model_registry import registry
 from birder_clip.net.text.base import TextEncoderBaseNet
+
+logger = logging.getLogger(__name__)
 
 
 class HFTextEncoder(TextEncoderBaseNet):
@@ -85,6 +88,13 @@ class HFTextEncoder(TextEncoderBaseNet):
             self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": use_reentrant})
         else:
             self.model.gradient_checkpointing_disable()
+
+    def adjust_context_length(self, new_context_length: int) -> None:
+        if new_context_length == self.context_length:
+            return
+
+        logger.warning("Context length adjustment is not supported for HF text encoders")
+        super().adjust_context_length(new_context_length)
 
     def _attention_mask(self, text: torch.Tensor) -> Optional[torch.Tensor]:
         if self.pad_token_id is None:
