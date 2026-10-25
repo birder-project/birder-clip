@@ -15,6 +15,7 @@ import torch
 from birder.common import cli
 from birder.common import lib as birder_lib
 from birder.conf import settings as birder_settings
+from birder.data.collators.naflex import NaFlexPathCollator
 from birder.data.dataloader.webdataset import make_wds_loader
 from birder.data.datasets.directory import ImageLoaderName
 from birder.data.datasets.directory import get_image_loader
@@ -23,6 +24,7 @@ from birder.data.datasets.webdataset import make_wds_dataset
 from birder.data.datasets.webdataset import prepare_wds_args
 from birder.data.datasets.webdataset import wds_args_from_info
 from birder.data.transforms.classification import inference_preset
+from birder.data.transforms.naflex import inference_preset as naflex_inference_preset
 from birder.inference.data_parallel import InferenceDataParallel
 from birder.scripts.predict import ndarray_to_fixed_size_list_array
 from torch.utils.data import DataLoader
@@ -112,7 +114,7 @@ def embed(args: argparse.Namespace) -> None:
         text_encoder_config=args.text_encoder_config,
         text_decoder_config=args.text_decoder_config,
         epoch=args.epoch,
-        new_size=args.size,
+        new_size=None if args.naflex is True else args.size,  # NaFlex uses the inference size as a token budget
         new_context_length=args.context_length,
         inference=True,
         st=args.st,
@@ -123,17 +125,18 @@ def embed(args: argparse.Namespace) -> None:
     if isinstance(net, ZeroShotMixin) is False:
         raise TypeError(f"{net.__class__.__name__} does not support zero-shot image embedding export")
 
-    if args.tokenizer is not None:
-        tokenizer_name = args.tokenizer
-    else:
-        tokenizer_name = net.tokenizer_name
+    if args.size is None:
+        args.size = lib.get_size_from_signature(model_info.signature)
+        logger.debug(f"Using size={args.size}")
 
-    if args.context_length is not None:
-        context_length = args.context_length
+    if args.naflex is True:
+        patch_size = net.image_encoder.stem_stride
+        max_seq_len = (args.size[0] // patch_size) * (args.size[1] // patch_size)
+        inference_transform = naflex_inference_preset(patch_size, max_seq_len, model_info.rgb_stats, args.center_crop)
+        inference_collate_fn = NaFlexPathCollator(patch_size)
     else:
-        context_length = lib.get_context_length_from_signature(model_info.signature)
-
-    logger.debug(f"Using tokenizer: {tokenizer_name}, context length={context_length}")
+        inference_transform = inference_preset(args.size, model_info.rgb_stats, args.center_crop, args.simple_crop)
+        inference_collate_fn = None
 
     if args.fast_matmul is True or args.amp is True:
         torch.set_float32_matmul_precision("high")
@@ -147,16 +150,11 @@ def embed(args: argparse.Namespace) -> None:
             compile_mode=args.compile_mode,
         )
     elif args.compile is True:
-        net = torch.compile(net, mode=args.compile_mode)
-        net.encode_image = torch.compile(net.encode_image, mode=args.compile_mode)
-
-    if args.size is None:
-        args.size = lib.get_size_from_signature(model_info.signature)
-        logger.debug(f"Using size={args.size}")
+        net = torch.compile(net, fullgraph=args.compile_fullgraph, mode=args.compile_mode)
+        net.encode_image = torch.compile(net.encode_image, fullgraph=args.compile_fullgraph, mode=args.compile_mode)
 
     input_channels = lib.get_channels_from_signature(model_info.signature)
     batch_size = args.batch_size
-    inference_transform = inference_preset(args.size, model_info.rgb_stats, args.center_crop, args.simple_crop)
     if args.wds is True:
         wds_path: str | list[str]
         if args.wds_info is not None:
@@ -184,7 +182,7 @@ def embed(args: argparse.Namespace) -> None:
             batch_size,
             num_workers=args.num_workers,
             prefetch_factor=args.prefetch_factor,
-            collate_fn=None,
+            collate_fn=inference_collate_fn,
             world_size=1,
             pin_memory=False,
             exact=True,
@@ -205,6 +203,7 @@ def embed(args: argparse.Namespace) -> None:
             shuffle=args.shuffle,
             num_workers=args.num_workers,
             prefetch_factor=args.prefetch_factor,
+            collate_fn=inference_collate_fn,
         )
 
     # Sort out output file names
@@ -212,7 +211,14 @@ def embed(args: argparse.Namespace) -> None:
     if args.epoch is not None:
         epoch_str = f"_e{args.epoch}"
 
-    base_output_path = f"{network_name}{epoch_str}_{args.size[0]}px_crop{args.center_crop}_{num_samples}"
+    if args.naflex is True:
+        size_str = f"na_{args.size[0]}px"
+        if args.center_crop != 1.0:
+            size_str = f"{size_str}_crop{args.center_crop}"
+    else:
+        size_str = f"{args.size[0]}px_crop{args.center_crop}"
+
+    base_output_path = f"{network_name}{epoch_str}_{size_str}_{num_samples}"
     if args.simple_crop is True:
         base_output_path = f"{base_output_path}_sc"
     if args.model_dtype != "float32":
@@ -224,6 +230,7 @@ def embed(args: argparse.Namespace) -> None:
 
     embeddings_path = birder_settings.RESULTS_DIR.joinpath(f"{base_output_path}_embeddings.parquet")
 
+    # Define Parquet writers
     embeddings_writer: Optional[pq.ParquetWriter] = None
     metadata_columns = ["sample"]
 
@@ -234,6 +241,7 @@ def embed(args: argparse.Namespace) -> None:
         "size": args.size,
         "center_crop": args.center_crop,
         "simple_crop": args.simple_crop,
+        "naflex": args.naflex,
         "normalized": True,
     }
 
@@ -286,6 +294,11 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument("--embed-dim", type=int, metavar="N", help="shared image-text embedding dimension")
     parser.add_argument("--tokenizer", type=str, help="the tokenizer to use")
     parser.add_argument(
+        "--model-config",
+        action=cli.FlexibleDictAction,
+        help="override the model default configuration, accepts key-value pairs or JSON",
+    )
+    parser.add_argument(
         "--image-encoder-config",
         action=cli.FlexibleDictAction,
         help="override the image encoder configuration, accepts key-value pairs or JSON",
@@ -303,25 +316,41 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument("-e", "--epoch", type=int, metavar="N", help="model checkpoint to load")
     parser.add_argument("-t", "--tag", type=str, help="model tag")
     parser.add_argument("--st", "--safetensors", default=False, action="store_true", help="load Safetensors weights")
-    parser.add_argument(
-        "--model-config",
-        action=cli.FlexibleDictAction,
-        help="override the model default configuration, accepts key-value pairs or JSON",
-    )
     parser.add_argument("--compile", default=False, action="store_true", help="enable compilation")
+    parser.add_argument("--compile-fullgraph", default=False, action="store_true", help="compile using fullgraph=True")
     parser.add_argument(
         "--compile-mode", type=str, choices=list(torch._inductor.list_mode_options().keys()), help="torch.compile mode"
     )
-    parser.add_argument("--batch-size", type=int, default=32, metavar="N", help="the batch size")
+    parser.add_argument(
+        "--model-dtype",
+        type=str,
+        choices=["float32", "float16", "bfloat16"],
+        default="float32",
+        help="model dtype to use",
+    )
+    parser.add_argument(
+        "--amp", default=False, action="store_true", help="use torch.amp.autocast for mixed precision inference"
+    )
+    parser.add_argument(
+        "--amp-dtype",
+        type=str,
+        choices=["float16", "bfloat16"],
+        help="whether to use float16 or bfloat16 for mixed precision",
+    )
+    parser.add_argument(
+        "--fast-matmul", default=False, action="store_true", help="use fast matrix multiplication (affects precision)"
+    )
     parser.add_argument(
         "--size", type=int, nargs="+", metavar=("H", "W"), help="image size for inference (defaults to model signature)"
     )
+    parser.add_argument("--naflex", default=False, action="store_true", help="use native aspect-ratio inference")
     parser.add_argument(
         "--context-length",
         type=int,
         metavar="N",
         help="text context length for inference (defaults to model signature)",
     )
+    parser.add_argument("--batch-size", type=int, default=32, metavar="N", help="the batch size")
     parser.add_argument(
         "--img-loader",
         type=str,
@@ -346,25 +375,6 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument("--shuffle", default=False, action="store_true", help="embed samples in random order")
     parser.add_argument("--prefix", type=str, help="add prefix to output file")
     parser.add_argument("--suffix", type=str, help="add suffix to output file")
-    parser.add_argument(
-        "--model-dtype",
-        type=str,
-        choices=["float32", "float16", "bfloat16"],
-        default="float32",
-        help="model dtype to use",
-    )
-    parser.add_argument(
-        "--amp", default=False, action="store_true", help="use torch.amp.autocast for mixed precision inference"
-    )
-    parser.add_argument(
-        "--amp-dtype",
-        type=str,
-        choices=["float16", "bfloat16"],
-        help="whether to use float16 or bfloat16 for mixed precision",
-    )
-    parser.add_argument(
-        "--fast-matmul", default=False, action="store_true", help="use fast matrix multiplication (affects precision)"
-    )
     parser.add_argument("--gpu", default=False, action="store_true", help="use gpu")
     parser.add_argument("--gpu-id", type=int, metavar="ID", help="gpu id to use (ignored in parallel mode)")
     parser.add_argument("--mps", default=False, action="store_true", help="use mps (Metal Performance Shaders) device")
@@ -404,8 +414,14 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.text_decoder_config is not None and "context_length" in args.text_decoder_config:
         raise cli.ValidationError("--text-decoder-config cannot contain context_length, use --context-length")
 
+    if args.compile_fullgraph is True and args.compile is False:
+        raise cli.ValidationError("--compile-fullgraph requires --compile")
+    if args.parallel is True and args.compile_fullgraph is True:
+        raise cli.ValidationError("--compile-fullgraph is not supported with --parallel")
     if args.compile_mode is not None and args.compile is False:
         raise cli.ValidationError("--compile-mode requires --compile")
+    if args.naflex is True and args.simple_crop is True:
+        raise cli.ValidationError("--naflex cannot be used with --simple-crop")
     if args.amp is True and args.model_dtype != "float32":
         raise cli.ValidationError("--amp can only be used with --model-dtype float32")
     if args.wds is False and len(args.data_path) == 0:

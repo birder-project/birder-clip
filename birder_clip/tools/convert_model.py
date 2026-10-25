@@ -241,7 +241,7 @@ def set_parser(subparsers: Any) -> None:
     )
     subparser.add_argument("-e", "--epoch", type=int, metavar="N", help="model checkpoint to load")
     subparser.add_argument("-t", "--tag", type=str, help="model tag (from the training phase)")
-    subparser.add_argument("--force", action="store_true", help="override existing model")
+    subparser.add_argument("-f", "--force", action="store_true", help="override existing model")
     subparser.add_argument("--class-file", type=str, help="Birder class file, one class per line")
     subparser.add_argument("--classes", type=str, nargs="*", help="class names for the exported classification head")
     subparser.add_argument(
@@ -276,13 +276,14 @@ def set_parser(subparsers: Any) -> None:
 
 def main(args: argparse.Namespace) -> None:
     args.resize = cli.parse_size(args.resize)
+
+    if registry.exists(args.network, task=Task.IMAGE_TEXT) is False:
+        raise cli.ValidationError(f"--network {args.network} not supported, see list-models tool for available options")
+
     if args.tokenizer is None:
         args.tokenizer = registry.get_default_tokenizer(args.network)
     if args.tokenizer is None:
         args.tokenizer = "simple_tokenizer"
-
-    if registry.exists(args.network, task=Task.IMAGE_TEXT) is False:
-        raise cli.ValidationError(f"--network {args.network} not supported, see list-models tool for available options")
 
     registered_config = registry.all_nets[args.network.lower()].config  # type: ignore[misc]
     net_type = registry.all_nets[args.network.lower()]

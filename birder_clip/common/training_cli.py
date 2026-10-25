@@ -5,7 +5,9 @@ from typing import Optional
 from typing import get_args
 
 import torch
-from birder.common import cli
+from birder.common.cli import FlexibleDictAction
+from birder.common.cli import ValidationError
+from birder.common.training_utils import DDPCommDType
 from birder.common.training_utils import OptimizerType
 from birder.common.training_utils import SchedulerType
 from birder.conf import settings
@@ -13,12 +15,9 @@ from birder.data.datasets.directory import ImageLoaderName
 from birder.data.transforms.classification import AugType
 from birder.data.transforms.classification import RGBMode
 
-from birder_clip.model_registry import Task
-from birder_clip.model_registry import registry
-
 
 def add_model_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("-n", "--network", type=str, help="the image-text network to train")
+    parser.add_argument("-n", "--network", type=str, help="the neural network to use")
     parser.add_argument("-t", "--tag", type=str, help="add model tag")
     parser.add_argument("--image-encoder", type=str, help="the image encoder to use")
     parser.add_argument(
@@ -32,22 +31,25 @@ def add_model_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tokenizer", type=str, help="the tokenizer to use")
     parser.add_argument(
         "--model-config",
-        action=cli.FlexibleDictAction,
-        help="override the model default configuration, accepts key-value pairs or JSON",
+        action=FlexibleDictAction,
+        help=(
+            "override the model default configuration, accepts key-value pairs or JSON "
+            "('init_logit_bias=-10.0' or '{\"visual_pool\": {\"num_heads\": 16}}')"
+        ),
     )
     parser.add_argument(
         "--image-encoder-config",
-        action=cli.FlexibleDictAction,
+        action=FlexibleDictAction,
         help="override the image encoder configuration, accepts key-value pairs or JSON",
     )
     parser.add_argument(
         "--text-encoder-config",
-        action=cli.FlexibleDictAction,
+        action=FlexibleDictAction,
         help="override the text encoder configuration, accepts key-value pairs or JSON",
     )
     parser.add_argument(
         "--text-decoder-config",
-        action=cli.FlexibleDictAction,
+        action=FlexibleDictAction,
         help="override the text decoder configuration, accepts key-value pairs or JSON",
     )
     parser.add_argument(
@@ -129,13 +131,13 @@ def add_lr_wd_args(parser: argparse.ArgumentParser) -> None:
     )
     group.add_argument(
         "--custom-layer-wd",
-        action=cli.FlexibleDictAction,
+        action=FlexibleDictAction,
         metavar="LAYER=WD",
-        help="custom weight decay for specific layers by name (e.g., logit_scale=0.0)",
+        help="custom weight decay for specific layers by name (e.g., offset_conv=0.0)",
     )
 
 
-def add_lr_scheduler_args(parser: argparse.ArgumentParser) -> None:
+def add_lr_scheduler_args(parser: argparse.ArgumentParser, default_cosine_fraction: float = 1.0) -> None:
     group = parser.add_argument_group("Learning rate scheduler parameters")
     group.add_argument(
         "--lr-scheduler-update",
@@ -156,25 +158,37 @@ def add_lr_scheduler_args(parser: argparse.ArgumentParser) -> None:
         type=int,
         default=40,
         metavar="N",
-        help="decrease lr every N epochs/steps (relative to after warmup, step scheduler only)",
+        help=(
+            "number of scheduler updates between lr decreases, counted from when StepLR becomes active "
+            "(--lr-scheduler step only)"
+        ),
     )
     group.add_argument(
         "--lr-steps",
         type=int,
         nargs="+",
-        help="absolute epoch/step milestones when to decrease lr (multistep scheduler only)",
+        help=(
+            "absolute training epochs/optimizer steps, counted from training start, at which to decrease lr "
+            "(--lr-scheduler multistep only)"
+        ),
     )
     group.add_argument(
         "--lr-step-gamma",
         type=float,
         default=0.75,
-        help="multiplicative factor of learning rate decay (for step scheduler only)",
+        help="multiplicative learning rate decay factor (--lr-scheduler step or multistep)",
     )
     group.add_argument(
         "--lr-cosine-min",
         type=float,
         default=0.000001,
         help="minimum learning rate (for cosine annealing scheduler only)",
+    )
+    group.add_argument(
+        "--lr-cosine-fraction",
+        type=float,
+        default=default_cosine_fraction,
+        help="fraction of the cosine half-period to use (for cosine annealing scheduler only)",
     )
     group.add_argument(
         "--lr-power", type=float, default=1.0, help="power of the polynomial (for polynomial scheduler only)"
@@ -254,7 +268,27 @@ def add_input_args(parser: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--channels", type=int, default=settings.DEFAULT_NUM_CHANNELS, metavar="N", help="no. of image channels"
     )
-    group.add_argument("--size", type=int, nargs="+", metavar=("H", "W"), help="image size")
+    group.add_argument(
+        "--size", type=int, nargs="+", metavar=("H", "W"), help="image size (defaults to the network default size)"
+    )
+    group.add_argument("--naflex", default=False, action="store_true", help="use native aspect-ratio training")
+    group.add_argument(
+        "--naflex-sizes",
+        type=int,
+        nargs="+",
+        metavar="SIZE",
+        help=(
+            "square-equivalent image sizes in pixels to sample once per training batch, actual image "
+            "dimensions preserve aspect ratio (values must be divisible by the model patch size)"
+        ),
+    )
+    group.add_argument(
+        "--naflex-patch-sizes",
+        type=int,
+        nargs="+",
+        metavar="PATCH_SIZE",
+        help="patch sizes to sample once per training batch (values do not need to divide the image sizes)",
+    )
     group.add_argument("--context-length", type=int, metavar="N", help="text context length")
 
 
@@ -273,7 +307,7 @@ def add_data_aug_args(
         type=int,
         choices=list(range(10 + 1)),
         default=default_level,
-        help="magnitude of birder augmentations (0 off -> 10 highest)",
+        help="magnitude of birder augmentations (0 uses only resize and horizontal flip -> 10 highest)",
     )
     group.add_argument(
         "--use-grayscale", default=False, action="store_true", help="use grayscale augmentation (birder aug only)"
@@ -286,6 +320,26 @@ def add_data_aug_args(
         help="number of augmentation transformations to apply sequentially",
     )
     group.add_argument("--ra-magnitude", type=int, default=9, help="magnitude for all the RandAugment transformations")
+    group.add_argument(
+        "--timm-num-ops",
+        type=int,
+        default=2,
+        metavar="N",
+        help="number of timm-style RandAugment transformations to select sequentially",
+    )
+    group.add_argument(
+        "--timm-magnitude",
+        type=int,
+        choices=list(range(10 + 1)),
+        default=9,
+        help="magnitude of timm-style RandAugment transformations",
+    )
+    group.add_argument(
+        "--timm-magnitude-std",
+        type=float,
+        default=0.5,
+        help="standard deviation of timm-style RandAugment magnitude noise",
+    )
     group.add_argument("--augmix-severity", type=int, default=3, help="severity of AugMix policy")
     group.add_argument("--clip-color-jitter-prob", type=float, default=0.0, help="CLIP color jitter probability")
     group.add_argument("--clip-gray-prob", type=float, default=0.0, help="CLIP grayscale probability")
@@ -451,7 +505,9 @@ def add_compile_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def add_checkpoint_args(parser: argparse.ArgumentParser, default_save_frequency: int = 1) -> None:
+def add_checkpoint_args(
+    parser: argparse.ArgumentParser, default_save_frequency: int = 1, load_ema: bool = False
+) -> None:
     group = parser.add_argument_group("Checkpoint parameters")
     group.add_argument(
         "--save-frequency", type=int, default=default_save_frequency, metavar="N", help="frequency of model saving"
@@ -479,11 +535,16 @@ def add_checkpoint_args(parser: argparse.ArgumentParser, default_save_frequency:
         help="load optimizer, scheduler and scaler states when resuming",
     )
     group.add_argument("--load-scheduler", default=False, action="store_true", help="load only scheduler when resuming")
+    if load_ema is True:
+        group.add_argument(
+            "--load-ema", default=False, action="store_true", help="load EMA model weights when resuming"
+        )
 
 
 def add_distributed_args(parser: argparse.ArgumentParser) -> None:
     group = parser.add_argument_group("Distributed training parameters")
     group.add_argument("--world-size", type=int, default=1, metavar="N", help="number of distributed processes")
+    group.add_argument("--rank", type=int, default=0, metavar="N", help="global distributed process rank")
     group.add_argument("--local-rank", type=int, metavar="N", help="local rank")
     group.add_argument("--dist-url", type=str, default="env://", help="URL used to initialize distributed training")
     group.add_argument("--dist-backend", type=str, default="nccl", help="distributed backend")
@@ -524,6 +585,12 @@ def add_distributed_args(parser: argparse.ArgumentParser) -> None:
     )
     group.add_argument(
         "--fsdp-offload-policy", type=str, choices=["none", "cpu"], default="none", help="FSDP parameter offload policy"
+    )
+    group.add_argument(
+        "--ddp-comm-dtype",
+        type=str,
+        choices=list(get_args(DDPCommDType)),
+        help="compress DDP gradient communication to the specified dtype (DDP only)",
     )
     group.add_argument(
         "--find-unused-parameters",
@@ -581,12 +648,25 @@ def add_logging_and_debug_args(parser: argparse.ArgumentParser, default_log_inte
         "--use-fake-data",
         default=False,
         action="store_true",
-        help="use fake data instead of real dataset",
+        help="use fake data instead of real dataset (like torchvision.datasets.FakeData)",
     )
 
 
 def add_training_data_args(parser: argparse.ArgumentParser) -> None:
-    group = parser.add_argument_group("Training data parameters", description="WebDataset")
+    group = parser.add_argument_group("Training data parameters")
+    group.add_argument(
+        "--caption-fields",
+        type=str,
+        nargs="+",
+        default=["caption"],
+        metavar="FIELD",
+        help=(
+            "caption fields (CSV columns or WebDataset JSON keys) to sample uniformly from non-empty values "
+            "(validation uses the first non-empty field)"
+        ),
+    )
+
+    group = parser.add_argument_group(description="WebDataset")
     group.add_argument("--wds", default=False, action="store_true", help="use webdataset for training")
     group.add_argument("--wds-info", type=str, action="append", metavar="FILE", help="one or more wds info file paths")
     group.add_argument("--wds-cache-dir", type=str, metavar="DIR", help="webdataset cache directory")
@@ -602,122 +682,177 @@ def add_training_data_args(parser: argparse.ArgumentParser) -> None:
         "--wds-extra-shuffle",
         default=False,
         action="store_true",
-        help="enable cross-worker batch shuffling after batching",
+        help=(
+            "enable cross-worker batch shuffling after batching. Provides maximum sample diversity but incurs a "
+            "notable performance penalty. Use with caution"
+        ),
     )
 
     group = parser.add_argument_group(description="CSV")
-    group.add_argument("--data-path", nargs="*", help="training CSV file paths (required columns: image_path, caption)")
     group.add_argument(
-        "--val-path", nargs="*", help="validation CSV file paths (required columns: image_path, caption)"
+        "--data-path", nargs="*", help="training CSV file paths (requires image_path and the selected caption columns)"
+    )
+    group.add_argument(
+        "--val-path", nargs="*", help="validation CSV file paths (requires image_path and the selected caption columns)"
     )
 
 
 def common_args_validation(args: argparse.Namespace) -> None:
     if args.network is None:
-        raise cli.ValidationError("--network is required")
-    if registry.exists(args.network, task=Task.IMAGE_TEXT) is False:
-        raise cli.ValidationError(f"--network {args.network} not supported, see list-models tool for available options")
+        raise ValidationError("--network is required")
 
+    # Training schedule args, shared by all scripts
     if args.stop_epoch is not None and args.stop_epoch > args.epochs:
-        raise cli.ValidationError(
+        raise ValidationError(
             f"--stop-epoch must be smaller than the total number of epochs ({args.epochs}), got {args.stop_epoch}"
         )
     if args.warmup_epochs is not None and args.warmup_steps is not None:
-        raise cli.ValidationError("--warmup-epochs cannot be used with --warmup-steps")
+        raise ValidationError("--warmup-epochs cannot be used with --warmup-steps")
     if args.cooldown_epochs is not None and args.cooldown_steps is not None:
-        raise cli.ValidationError("--cooldown-epochs cannot be used with --cooldown-steps")
+        raise ValidationError("--cooldown-epochs cannot be used with --cooldown-steps")
+    if args.keep_last is not None and args.keep_last < 1:
+        raise ValidationError(f"--keep-last must be greater than or equal to 1, got {args.keep_last}")
+
     if args.lr_scheduler_update != "step" and args.warmup_steps is not None:
-        raise cli.ValidationError(
+        raise ValidationError(
             "--warmup-steps can only be used when --lr-scheduler-update is 'step', "
             f"but it is set to '{args.lr_scheduler_update}'"
         )
     if args.lr_scheduler_update != "step" and args.cooldown_steps is not None:
-        raise cli.ValidationError(
+        raise ValidationError(
             "--cooldown-steps can only be used when --lr-scheduler-update is 'step', "
             f"but it is set to '{args.lr_scheduler_update}'"
         )
-
-    if args.compile_fullgraph is True and args.compile is False:
-        raise cli.ValidationError("--compile-fullgraph requires --compile")
-    if args.compile_mode is not None and args.compile is False:
-        raise cli.ValidationError("--compile-mode requires --compile")
-
-    if args.load_states is True and args.resume_epoch is None:
-        raise cli.ValidationError("--load-states requires --resume-epoch to be set")
-    if args.load_scheduler is True and args.resume_epoch is None:
-        raise cli.ValidationError("--load-scheduler requires --resume-epoch to be set")
-    if args.pretrained is True and args.resume_epoch is not None:
-        raise cli.ValidationError("--pretrained cannot be used with --resume-epoch")
-    if args.image_encoder_pretrained is not None and args.resume_epoch is not None:
-        raise cli.ValidationError("--image-encoder-pretrained cannot be used with --resume-epoch")
-    if args.pretrained is True and args.image_encoder_pretrained is not None:
-        raise cli.ValidationError("--image-encoder-pretrained cannot be used with --pretrained")
-
-    if args.freeze_bn is True and args.sync_bn is True:
-        raise cli.ValidationError("--freeze-bn cannot be used with --sync-bn")
-
-    if args.wds is False and args.data_path is None and args.use_fake_data is False:
-        raise cli.ValidationError("Must provide at least one data source, --data-path or --wds")
-    if args.wds is False and args.data_path is not None and len(args.data_path) == 0 and args.use_fake_data is False:
-        raise cli.ValidationError("Must provide at least one data source, --data-path or --wds")
-    if args.wds is True and args.data_path is not None and len(args.data_path) > 1:
-        raise cli.ValidationError(f"--wds can have at most 1 --data-path, got {len(args.data_path)}")
-    if args.val_path is not None and len(args.val_path) == 0:
-        raise cli.ValidationError("--val-path must have at least one value")
-    if args.use_fake_data is True and args.wds is True:
-        raise cli.ValidationError("--use-fake-data cannot be used with --wds")
-    if args.persistent_workers is True and args.num_workers == 0:
-        raise cli.ValidationError("--persistent-workers requires --num-workers to be greater than 0")
-
-    if args.amp is True and args.model_dtype != "float32":
-        raise cli.ValidationError("--amp can only be used with --model-dtype float32")
-    if args.embed_dim is not None and args.embed_dim <= 0:
-        raise cli.ValidationError("--embed-dim must be positive")
-    if args.context_length is not None and args.context_length <= 0:
-        raise cli.ValidationError("--context-length must be positive")
-    if args.grad_accum_steps < 1:
-        raise cli.ValidationError("--grad-accum-steps must be >= 1")
-    if args.grad_accum_cache_negatives is True and args.grad_accum_steps == 1:
-        raise cli.ValidationError("--grad-accum-cache-negatives requires --grad-accum-steps greater than 1")
-    if args.grad_accum_cache_negatives is True and args.loss != "clip":
-        raise cli.ValidationError("--grad-accum-cache-negatives is only supported with --loss clip")
-
-    if args.coca_caption_loss_weight < 0.0:
-        raise cli.ValidationError("--coca-caption-loss-weight must be non-negative")
-    if args.coca_contrastive_loss_weight < 0.0:
-        raise cli.ValidationError("--coca-contrastive-loss-weight must be non-negative")
-    if args.openvision_v2_keep_ratio is not None:
-        if args.openvision_v2_keep_ratio <= 0.0 or args.openvision_v2_keep_ratio > 1.0:
-            raise cli.ValidationError("--openvision-v2-keep-ratio must be in range of (0, 1]")
+    if args.lr_cosine_fraction <= 0.0 or args.lr_cosine_fraction > 1.0:
+        raise ValidationError("--lr-cosine-fraction must be in the range (0, 1]")
+    if args.lr_warmup_decay <= 0.0 or args.lr_warmup_decay > 1.0:
+        raise ValidationError("--lr-warmup-decay must be in the range (0, 1]")
 
     # EMA
     if args.model_ema_steps < 1:
-        raise cli.ValidationError("--model-ema-steps must be >= 1")
+        raise ValidationError("--model-ema-steps must be >= 1")
 
     # Gradient checkpointing args
     if args.grad_checkpointing_segments is not None and args.grad_checkpointing_segments < 1:
-        raise cli.ValidationError("--grad-checkpointing-segments must be >= 1")
+        raise ValidationError("--grad-checkpointing-segments must be >= 1")
     if args.grad_checkpointing_segments is not None and args.grad_checkpointing is False:
-        raise cli.ValidationError("--grad-checkpointing-segments requires --grad-checkpointing")
+        raise ValidationError("--grad-checkpointing-segments requires --grad-checkpointing")
 
+    # Compile args, argument dependant
+    if args.compile_fullgraph is True and args.compile is False:
+        raise ValidationError("--compile-fullgraph requires --compile")
+    if args.compile_mode is not None and args.compile is False:
+        raise ValidationError("--compile-mode requires --compile")
+
+    # Checkpoint args, shared by all scripts
+    if args.load_states is True and args.resume_epoch is None:
+        raise ValidationError("--load-states requires --resume-epoch to be set")
+    if hasattr(args, "load_ema") is True and args.load_ema is True:
+        if args.resume_epoch is None:
+            raise ValidationError("--load-ema requires --resume-epoch to be set")
+        if args.model_ema is False:
+            raise ValidationError("--load-ema requires --model-ema")
+    if args.load_scheduler is True and args.resume_epoch is None:
+        raise ValidationError("--load-scheduler requires --resume-epoch to be set")
+    if args.pretrained is True and args.resume_epoch is not None:
+        raise ValidationError("--pretrained cannot be used with --resume-epoch")
+
+    # Input args
+    if args.naflex is True:
+        if args.simple_crop is True:
+            raise ValidationError("--naflex cannot be used with --simple-crop")
+        if args.wds is True and args.wds_extra_shuffle is True:
+            raise ValidationError("--naflex cannot be used with --wds-extra-shuffle")
+
+    if args.naflex_sizes is not None:
+        if args.naflex is False:
+            raise ValidationError("--naflex-sizes requires --naflex")
+        if any(size <= 0 for size in args.naflex_sizes):
+            raise ValidationError(f"--naflex-sizes values must be positive, got {args.naflex_sizes}")
+        if len(set(args.naflex_sizes)) != len(args.naflex_sizes):
+            raise ValidationError(f"--naflex-sizes values must be unique, got {args.naflex_sizes}")
+
+    if args.naflex_patch_sizes is not None:
+        if args.naflex is False:
+            raise ValidationError("--naflex-patch-sizes requires --naflex")
+        if len(set(args.naflex_patch_sizes)) != len(args.naflex_patch_sizes):
+            raise ValidationError(f"--naflex-patch-sizes values must be unique, got {args.naflex_patch_sizes}")
+
+    # Data augmentation args
+    if args.rgb_mean is not None and len(args.rgb_mean) != args.channels:
+        raise ValidationError(f"--rgb-mean must have {args.channels} values, got {len(args.rgb_mean)}")
+    if args.rgb_std is not None and len(args.rgb_std) != args.channels:
+        raise ValidationError(f"--rgb-std must have {args.channels} values, got {len(args.rgb_std)}")
+
+    if args.resize_min_scale is not None and (args.resize_min_scale <= 0.0 or args.resize_min_scale >= 1.0):
+        raise ValidationError(f"--resize-min-scale must be in range of (0, 1.0), got {args.resize_min_scale}")
+    if args.center_crop > 1 or args.center_crop <= 0.0:
+        raise ValidationError(f"--center-crop must be in range of (0, 1.0], got {args.center_crop}")
+    if args.clip_color_jitter_prob is not None and (
+        args.clip_color_jitter_prob < 0.0 or args.clip_color_jitter_prob > 1.0
+    ):
+        raise ValidationError(f"--clip-color-jitter-prob must be in range of [0, 1], got {args.clip_color_jitter_prob}")
+    if args.clip_gray_prob is not None and (args.clip_gray_prob < 0.0 or args.clip_gray_prob > 1.0):
+        raise ValidationError(f"--clip-gray-prob must be in range of [0, 1], got {args.clip_gray_prob}")
+
+    # Training data args
+    if len(args.caption_fields) == 0 or any(len(field.strip()) == 0 for field in args.caption_fields):
+        raise ValidationError("--caption-fields must contain non-empty field names")
+    if len(set(args.caption_fields)) != len(args.caption_fields):
+        raise ValidationError("--caption-fields must not contain duplicate field names")
+
+    if args.wds is False and args.data_path is None and args.use_fake_data is False:
+        raise ValidationError("Must provide at least one data source, --data-path or --wds")
+    if args.wds is False and args.data_path is not None and len(args.data_path) == 0 and args.use_fake_data is False:
+        raise ValidationError("Must provide at least one data source, --data-path or --wds")
+    if args.wds is True and args.data_path is not None and len(args.data_path) > 1:
+        raise ValidationError(f"--wds can have at most 1 --data-path, got {len(args.data_path)}")
+    if args.val_path is not None and len(args.val_path) == 0:
+        raise ValidationError("--val-path must have at least one value")
+    if args.use_fake_data is True and args.wds is True:
+        raise ValidationError("--use-fake-data cannot be used with --wds")
+    if args.wds is True and args.data_path is None and args.wds_info is None:
+        raise ValidationError("Must provide at least one data source, --data-path or --wds-info")
+    if args.wds is True and args.wds_info is not None and args.val_path is not None:
+        raise ValidationError("--val-path cannot be used with --wds-info")
+
+    # Dataloader args
+    if args.persistent_workers is True and args.num_workers == 0:
+        raise ValidationError("--persistent-workers requires --num-workers to be greater than 0")
+
+    # BatchNorm args, shared by some scripts
+    if args.freeze_bn is True and args.sync_bn is True:
+        raise ValidationError("--freeze-bn cannot be used with --sync-bn")
+
+    # FSDP mode checks
     if args.distributed_mode == "fsdp":
         if args.grad_checkpointing is True:
-            raise cli.ValidationError("--grad-checkpointing cannot be used with --distributed-mode fsdp")
+            raise ValidationError("--grad-checkpointing cannot be used with --distributed-mode fsdp")
         if args.sync_bn is True:
-            raise cli.ValidationError("--sync-bn cannot be used with --distributed-mode fsdp")
+            raise ValidationError("--sync-bn cannot be used with --distributed-mode fsdp")
         if args.find_unused_parameters is True:
-            raise cli.ValidationError("--find-unused-parameters cannot be used with --distributed-mode fsdp")
-        if args.compile_opt is True:
-            raise cli.ValidationError("--compile-opt cannot be used with --distributed-mode fsdp")
-        if args.compile_fullgraph is True:
-            raise cli.ValidationError("--compile-fullgraph cannot be used with --distributed-mode fsdp")
-        if torch.device(args.device).type == "cpu":
-            raise cli.ValidationError("--device cpu cannot be used with --distributed-mode fsdp")
-        if args.model_ema is True:
-            raise cli.ValidationError("--model-ema cannot be used with --distributed-mode fsdp")
-        if args.fsdp_wrap_policy == "min-num-params" and args.fsdp_wrap_min_num_params is None:
-            raise cli.ValidationError(
-                "--fsdp-wrap-min-num-params is required when --fsdp-wrap-policy is min-num-params"
+            raise ValidationError("--find-unused-parameters cannot be used with --distributed-mode fsdp")
+        if args.ddp_comm_dtype is not None:
+            raise ValidationError(
+                "--ddp-comm-dtype cannot be used with --distributed-mode fsdp, use --fsdp-reduce-dtype instead"
             )
+        if args.compile_opt is True:
+            raise ValidationError("--compile-opt cannot be used with --distributed-mode fsdp")
+        if args.compile_fullgraph is True:
+            raise ValidationError("--compile-fullgraph cannot be used with --distributed-mode fsdp")
+        if torch.device(args.device).type == "cpu":
+            raise ValidationError("--device cpu cannot be used with --distributed-mode fsdp")
+        if args.model_ema is True:
+            raise ValidationError("--model-ema cannot be used with --distributed-mode fsdp")
+        if args.fsdp_wrap_policy == "min-num-params" and args.fsdp_wrap_min_num_params is None:
+            raise ValidationError("--fsdp-wrap-min-num-params is required when --fsdp-wrap-policy is min-num-params")
         if args.fsdp_wrap_min_num_params is not None and args.fsdp_wrap_min_num_params <= 0:
-            raise cli.ValidationError("--fsdp-wrap-min-num-params must be > 0")
+            raise ValidationError("--fsdp-wrap-min-num-params must be > 0")
+
+    # Precision args, shared by all scripts
+    if args.amp is True and args.model_dtype != "float32":
+        raise ValidationError("--amp can only be used with --model-dtype float32")
+
+    # Optimization args
+    if args.grad_accum_steps < 1:
+        raise ValidationError("--grad-accum-steps must be >= 1")

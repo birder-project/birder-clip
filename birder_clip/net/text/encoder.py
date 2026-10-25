@@ -104,7 +104,7 @@ class Attention(nn.Module):
             attn_mask = _combine_causal_attention_mask(attn_mask, N, N)
             is_causal = False
 
-        x = F.scaled_dot_product_attention(  # pylint: disable=not-callable
+        x = F.scaled_dot_product_attention(
             q,
             k,
             v,

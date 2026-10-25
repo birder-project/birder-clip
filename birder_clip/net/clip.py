@@ -78,8 +78,18 @@ class CLIP(BaseNet, ZeroShotMixin):
             use_reentrant=use_reentrant,
         )
 
-    def encode_image(self, image: torch.Tensor, normalize: bool = False) -> torch.Tensor:
-        features = self.image_encoder(image)
+    def encode_image(
+        self,
+        image: torch.Tensor,
+        normalize: bool = False,
+        *,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if grid_sizes is None:
+            features = self.image_encoder(image)
+        else:
+            features = self.image_encoder(image, grid_sizes=grid_sizes, valid_mask=valid_mask)
         if normalize is True:
             features = F.normalize(features, dim=-1)
 
@@ -100,9 +110,15 @@ class CLIP(BaseNet, ZeroShotMixin):
         return logits
 
     def forward(
-        self, image: torch.Tensor, text: torch.Tensor, *, return_features: bool = False
+        self,
+        image: torch.Tensor,
+        text: torch.Tensor,
+        *,
+        return_features: bool = False,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor | dict[str, Optional[torch.Tensor]]:
-        image_features = self.encode_image(image, normalize=True)
+        image_features = self.encode_image(image, normalize=True, grid_sizes=grid_sizes, valid_mask=valid_mask)
         text_features = self.encode_text(text, normalize=True)
         if return_features is True:
             return {

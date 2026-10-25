@@ -14,6 +14,7 @@ from birder.common import cli
 from birder.common import lib as birder_lib
 from birder.common.fs_ops import read_class_file
 from birder.conf import settings as birder_settings
+from birder.data.collators.naflex import NaFlexPathCollator
 from birder.data.dataloader.webdataset import make_wds_loader
 from birder.data.datasets.directory import ImageLoaderName
 from birder.data.datasets.directory import class_to_idx_from_paths
@@ -23,7 +24,9 @@ from birder.data.datasets.webdataset import make_wds_dataset
 from birder.data.datasets.webdataset import prepare_wds_args
 from birder.data.datasets.webdataset import wds_args_from_info
 from birder.data.transforms.classification import inference_preset
+from birder.data.transforms.naflex import inference_preset as naflex_inference_preset
 from birder.results.classification import Results
+from birder.results.classification import SparseResults
 from birder.scripts.predict import _init_parquet_writer
 from birder.scripts.predict import _sanitize_results_labels
 from birder.scripts.predict import _validate_label_names
@@ -116,7 +119,7 @@ def predict(args: argparse.Namespace) -> None:
         text_encoder_config=args.text_encoder_config,
         text_decoder_config=args.text_decoder_config,
         epoch=args.epoch,
-        new_size=args.size,
+        new_size=None if args.naflex is True else args.size,  # NaFlex uses the inference size as a token budget
         new_context_length=args.context_length,
         inference=True,
         st=args.st,
@@ -126,6 +129,19 @@ def predict(args: argparse.Namespace) -> None:
     logger.debug(f"RGB stats: {model_info.rgb_stats}")
     if isinstance(net, ZeroShotMixin) is False:
         raise TypeError(f"{net.__class__.__name__} does not support zero-shot inference")
+
+    if args.size is None:
+        args.size = lib.get_size_from_signature(model_info.signature)
+        logger.debug(f"Using size={args.size}")
+
+    if args.naflex is True:
+        patch_size = net.image_encoder.stem_stride
+        max_seq_len = (args.size[0] // patch_size) * (args.size[1] // patch_size)
+        inference_transform = naflex_inference_preset(patch_size, max_seq_len, model_info.rgb_stats, args.center_crop)
+        inference_collate_fn = NaFlexPathCollator(patch_size)
+    else:
+        inference_transform = inference_preset(args.size, model_info.rgb_stats, args.center_crop, args.simple_crop)
+        inference_collate_fn = None
 
     if args.tokenizer is not None:
         tokenizer_name = args.tokenizer
@@ -141,7 +157,8 @@ def predict(args: argparse.Namespace) -> None:
     logger.debug(f"Using tokenizer: {tokenizer_name}, context length={context_length}")
 
     class_to_idx = get_class_to_idx(args)
-    class_names = list(class_to_idx.keys())
+    logger.debug(f"Using {len(class_to_idx)} classes")
+    class_names = birder_lib.class_list_from_class_to_idx(class_to_idx)
 
     if args.show_class is not None:
         if args.show_class not in class_to_idx:
@@ -151,18 +168,13 @@ def predict(args: argparse.Namespace) -> None:
         torch.set_float32_matmul_precision("high")
 
     if parallel is False and args.compile is True:
-        net = torch.compile(net, mode=args.compile_mode)
-        net.encode_image = torch.compile(net.encode_image, mode=args.compile_mode)
-        net.encode_text = torch.compile(net.encode_text, mode=args.compile_mode)
-        net.forward_logits = torch.compile(net.forward_logits, mode=args.compile_mode)
-
-    if args.size is None:
-        args.size = lib.get_size_from_signature(model_info.signature)
-        logger.debug(f"Using size={args.size}")
+        net = torch.compile(net, fullgraph=args.compile_fullgraph, mode=args.compile_mode)
+        net.encode_image = torch.compile(net.encode_image, fullgraph=args.compile_fullgraph, mode=args.compile_mode)
+        net.encode_text = torch.compile(net.encode_text, fullgraph=args.compile_fullgraph, mode=args.compile_mode)
+        net.forward_logits = torch.compile(net.forward_logits, fullgraph=args.compile_fullgraph, mode=args.compile_mode)
 
     input_channels = lib.get_channels_from_signature(model_info.signature)
     batch_size = args.batch_size
-    inference_transform = inference_preset(args.size, model_info.rgb_stats, args.center_crop, args.simple_crop)
     if args.wds is True:
         wds_path: str | list[str]
         if args.wds_info is not None:
@@ -187,7 +199,7 @@ def predict(args: argparse.Namespace) -> None:
             batch_size,
             num_workers=args.num_workers,
             prefetch_factor=args.prefetch_factor,
-            collate_fn=None,
+            collate_fn=inference_collate_fn,
             world_size=1,
             pin_memory=False,
             exact=True,
@@ -205,6 +217,7 @@ def predict(args: argparse.Namespace) -> None:
             shuffle=args.shuffle,
             num_workers=args.num_workers,
             prefetch_factor=args.prefetch_factor,
+            collate_fn=inference_collate_fn,
         )
 
     show_flag = (
@@ -229,9 +242,14 @@ def predict(args: argparse.Namespace) -> None:
     if args.epoch is not None:
         epoch_str = f"_e{args.epoch}"
 
-    base_output_path = (
-        f"{network_name}_{len(class_to_idx)}{epoch_str}_{args.size[0]}px_crop{args.center_crop}_{num_samples}"
-    )
+    if args.naflex is True:
+        size_str = f"na_{args.size[0]}px"
+        if args.center_crop != 1.0:
+            size_str = f"{size_str}_crop{args.center_crop}"
+    else:
+        size_str = f"{args.size[0]}px_crop{args.center_crop}"
+
+    base_output_path = f"{network_name}_{len(class_to_idx)}{epoch_str}_{size_str}_{num_samples}"
     if args.simple_crop is True:
         base_output_path = f"{base_output_path}_sc"
     if args.tta is True:
@@ -243,12 +261,18 @@ def predict(args: argparse.Namespace) -> None:
     if args.suffix is not None:
         base_output_path = f"{base_output_path}_{args.suffix}"
 
-    results_path = f"{base_output_path}.csv"
+    if args.save_sparse_results is True:
+        results_file_suffix = "_sparse.csv"
+    else:
+        results_file_suffix = ".csv"
+
+    results_path = f"{base_output_path}{results_file_suffix}"
     logits_path = birder_settings.RESULTS_DIR.joinpath(f"{base_output_path}_logits.{args.output_format}")
     output_path = birder_settings.RESULTS_DIR.joinpath(f"{base_output_path}_output.{args.output_format}")
     if args.save_logits is True or args.save_output is True:
         _validate_label_names(class_names)
 
+    # Define Parquet writers
     logits_writer: Optional[pq.ParquetWriter] = None
     output_writer: Optional[pq.ParquetWriter] = None
     metadata_columns = ["sample"]
@@ -320,7 +344,7 @@ def predict(args: argparse.Namespace) -> None:
                     save_output(output_path, sample_paths, class_names, outs, append=append, labels=labels_to_save)
 
             if args.save_logits is False and args.skip_results_analysis is False:
-                # Handle results
+                # Handle results (Results / SparseResults)
                 results_labels, num_invalid_results_labels = _sanitize_results_labels(labels, outs.shape[1])
                 if num_invalid_results_labels > 0:
                     logger.warning(
@@ -328,9 +352,14 @@ def predict(args: argparse.Namespace) -> None:
                         f"[0, {outs.shape[1] - 1}] for results analysis"
                     )
 
-                results = Results(sample_paths, results_labels, class_names, output=outs)
+                results: Results | SparseResults
+                if args.save_sparse_results is True:
+                    results = SparseResults(sample_paths, results_labels, class_names, output=outs)
+                else:
+                    results = Results(sample_paths, results_labels, class_names, output=outs)
+
                 if results.missing_all_labels is False:
-                    if args.save_results is True:
+                    if args.save_results is True or args.save_sparse_results is True:
                         results.save(results_path, append=results_append)
                         results_append = True
                     if args.chunk_size is None:
@@ -359,8 +388,8 @@ def predict(args: argparse.Namespace) -> None:
         summary_df = pl.concat(summary_list).group_by("prediction_names").agg(pl.col("count").sum())
         summary_df = summary_df.sort(by="count", descending=True)
         indent_size = summary_df["prediction_names"].str.len_chars().max() + 2  # type: ignore[operator]
-        for specie_name, count in summary_df.iter_rows():
-            logger.info(f"{specie_name:<{indent_size}} {count}")
+        for species_name, count in summary_df.iter_rows():
+            logger.info(f"{species_name:<{indent_size}} {count}")
 
 
 def get_args_parser() -> argparse.ArgumentParser:
@@ -384,6 +413,11 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument("--text-decoder", type=str, help="the text decoder to use")
     parser.add_argument("--embed-dim", type=int, metavar="N", help="shared image-text embedding dimension")
     parser.add_argument("--tokenizer", type=str, help="the tokenizer to use")
+    parser.add_argument(
+        "--model-config",
+        action=cli.FlexibleDictAction,
+        help="override the model default configuration, accepts key-value pairs or JSON",
+    )
     parser.add_argument(
         "--image-encoder-config",
         action=cli.FlexibleDictAction,
@@ -409,15 +443,31 @@ def get_args_parser() -> argparse.ArgumentParser:
         nargs="*",
         help="class names to use for zero-shot classification (defaults to ImageFolder classes)",
     )
-    parser.add_argument(
-        "--model-config",
-        action=cli.FlexibleDictAction,
-        help="override the model default configuration, accepts key-value pairs or JSON",
-    )
     parser.add_argument("--compile", default=False, action="store_true", help="enable compilation")
+    parser.add_argument("--compile-fullgraph", default=False, action="store_true", help="compile using fullgraph=True")
     parser.add_argument(
         "--compile-mode", type=str, choices=list(torch._inductor.list_mode_options().keys()), help="torch.compile mode"
     )
+    parser.add_argument(
+        "--model-dtype",
+        type=str,
+        choices=["float32", "float16", "bfloat16"],
+        default="float32",
+        help="model dtype to use",
+    )
+    parser.add_argument(
+        "--amp", default=False, action="store_true", help="use torch.amp.autocast for mixed precision inference"
+    )
+    parser.add_argument(
+        "--amp-dtype",
+        type=str,
+        choices=["float16", "bfloat16"],
+        help="whether to use float16 or bfloat16 for mixed precision",
+    )
+    parser.add_argument(
+        "--fast-matmul", default=False, action="store_true", help="use fast matrix multiplication (affects precision)"
+    )
+    parser.add_argument("--tta", default=False, action="store_true", help="test time augmentation (image oversampling)")
     parser.add_argument(
         "--template-set",
         choices=sorted(TEMPLATE_SETS.keys()),
@@ -426,17 +476,18 @@ def get_args_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--template", action="append", help="additional prompt template")
     parser.add_argument("--template-file", type=str, help="file with one prompt template per line")
-    parser.add_argument("--batch-size", type=int, default=32, metavar="N", help="the batch size")
-    parser.add_argument("--text-batch-size", type=int, metavar="N", help="class batch size for text encoding")
     parser.add_argument(
         "--size", type=int, nargs="+", metavar=("H", "W"), help="image size for inference (defaults to model signature)"
     )
+    parser.add_argument("--naflex", default=False, action="store_true", help="use native aspect-ratio inference")
     parser.add_argument(
         "--context-length",
         type=int,
         metavar="N",
         help="text context length for inference (defaults to model signature)",
     )
+    parser.add_argument("--batch-size", type=int, default=32, metavar="N", help="the batch size")
+    parser.add_argument("--text-batch-size", type=int, metavar="N", help="class batch size for text encoding")
     parser.add_argument(
         "--img-loader",
         type=str,
@@ -458,7 +509,6 @@ def get_args_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="use a simple crop that preserves aspect ratio but may trim parts of the image",
     )
-    parser.add_argument("--tta", default=False, action="store_true", help="test time augmentation (image oversampling)")
     parser.add_argument("--show", default=False, action="store_true", help="show image predictions")
     parser.add_argument("--show-top-below", type=float, help="show when top prediction is below given threshold")
     parser.add_argument("--show-target-below", type=float, help="show when target prediction is below given threshold")
@@ -468,6 +518,12 @@ def get_args_parser() -> argparse.ArgumentParser:
     parser.add_argument("--shuffle", default=False, action="store_true", help="predict samples in random order")
     parser.add_argument("--summary", default=False, action="store_true", help="log prediction summary")
     parser.add_argument("--save-results", default=False, action="store_true", help="save results object")
+    parser.add_argument(
+        "--save-sparse-results",
+        default=False,
+        action="store_true",
+        help="save results object in memory-efficient sparse format (only top-k probabilities)",
+    )
     parser.add_argument(
         "--skip-results-analysis",
         default=False,
@@ -491,25 +547,6 @@ def get_args_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--prefix", type=str, help="add prefix to output file")
     parser.add_argument("--suffix", type=str, help="add suffix to output file")
-    parser.add_argument(
-        "--model-dtype",
-        type=str,
-        choices=["float32", "float16", "bfloat16"],
-        default="float32",
-        help="model dtype to use",
-    )
-    parser.add_argument(
-        "--amp", default=False, action="store_true", help="use torch.amp.autocast for mixed precision inference"
-    )
-    parser.add_argument(
-        "--amp-dtype",
-        type=str,
-        choices=["float16", "bfloat16"],
-        help="whether to use float16 or bfloat16 for mixed precision",
-    )
-    parser.add_argument(
-        "--fast-matmul", default=False, action="store_true", help="use fast matrix multiplication (affects precision)"
-    )
     parser.add_argument("--gpu", default=False, action="store_true", help="use gpu")
     parser.add_argument("--gpu-id", type=int, metavar="ID", help="gpu id to use (ignored in parallel mode)")
     parser.add_argument("--mps", default=False, action="store_true", help="use mps (Metal Performance Shaders) device")
@@ -563,14 +600,29 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.text_decoder_config is not None and "context_length" in args.text_decoder_config:
         raise cli.ValidationError("--text-decoder-config cannot contain context_length, use --context-length")
 
+    if args.compile_fullgraph is True and args.compile is False:
+        raise cli.ValidationError("--compile-fullgraph requires --compile")
+    if args.parallel is True and args.compile_fullgraph is True:
+        raise cli.ValidationError("--compile-fullgraph is not supported with --parallel")
     if args.compile_mode is not None and args.compile is False:
         raise cli.ValidationError("--compile-mode requires --compile")
+
+    if args.naflex is True:
+        if args.tta is True:
+            raise cli.ValidationError("--naflex cannot be used with --tta")
+        if args.simple_crop is True:
+            raise cli.ValidationError("--naflex cannot be used with --simple-crop")
+
     if args.class_file is not None and args.classes is not None:
         raise cli.ValidationError("--class-file and --classes cannot be used together")
     if args.classes is not None and len(args.classes) == 0:
         raise cli.ValidationError("--classes requires at least one class name")
+    if args.save_results is True and args.save_sparse_results is True:
+        raise cli.ValidationError("--save-results cannot be used with --save-sparse-results")
     if args.skip_results_analysis is True and args.save_results is True:
         raise cli.ValidationError("--skip-results-analysis cannot be used with --save-results")
+    if args.skip_results_analysis is True and args.save_sparse_results is True:
+        raise cli.ValidationError("--skip-results-analysis cannot be used with --save-sparse-results")
     if args.skip_results_analysis is True and args.summary is True:
         raise cli.ValidationError("--skip-results-analysis cannot be used with --summary")
     if args.template is not None and args.template_file is not None:
@@ -583,6 +635,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise cli.ValidationError("--amp can only be used with --model-dtype float32")
     if args.save_logits is True and args.save_results is True:
         raise cli.ValidationError("--save-logits cannot be used with --save-results")
+    if args.save_logits is True and args.save_sparse_results is True:
+        raise cli.ValidationError("--save-logits cannot be used with --save-sparse-results")
     if args.save_logits is True and args.save_output is True:
         raise cli.ValidationError("--save-logits cannot be used with --save-output")
     if args.save_logits is True and args.summary is True:

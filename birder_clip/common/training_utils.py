@@ -9,9 +9,9 @@ import torch
 import torch.distributed as dist
 from birder.common import fsdp_utils
 from birder.common import training_utils as birder_training_utils
+from birder.conf import settings as birder_settings
 
 from birder_clip.common import fs_ops
-from birder_clip.conf import settings
 from birder_clip.version import __version__ as birder_clip_version
 
 
@@ -22,7 +22,7 @@ def setup_file_logging(log_file_path: str | Path) -> logging.Handler:
         style="{",
     )
     file_handler.setFormatter(formatter)
-    file_handler.setLevel(settings.LOG_LEVEL)
+    file_handler.setLevel(birder_settings.LOG_LEVEL)
 
     logging.getLogger("birder").addHandler(file_handler)
     logging.getLogger("birder_clip").addHandler(file_handler)

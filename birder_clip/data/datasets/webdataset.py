@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Callable
+from collections.abc import Sequence
 from functools import partial
 from typing import Any
 from typing import Optional
@@ -9,25 +10,17 @@ import webdataset as wds
 from birder.conf import settings
 from birder.data.datasets import webdataset as birder_wds
 
+from birder_clip.common.lib import select_caption
 from birder_clip.tokenizers import Tokenizer
 
 logger = logging.getLogger(__name__)
 
 
-def decode_caption(caption: Any, caption_json_key: str = "caption") -> str:
+def decode_caption(caption: Any, caption_fields: Sequence[str] = ("caption",), random_caption: bool = False) -> str:
     if isinstance(caption, dict):
-        if caption_json_key not in caption:
-            raise ValueError(f"WebDataset JSON sample missing '{caption_json_key}' key")
+        return select_caption([caption.get(field) for field in caption_fields], random_caption=random_caption)
 
-        caption = caption[caption_json_key]
-
-    if isinstance(caption, bytes):
-        caption = caption.decode("utf-8")
-
-    if not isinstance(caption, str):
-        raise TypeError(f"WebDataset caption must be a string, got {type(caption).__name__}")
-
-    return caption
+    return select_caption([caption], random_caption=random_caption)
 
 
 def tokenize_caption(caption: str, tokenizer: Tokenizer) -> torch.Tensor:
@@ -39,13 +32,14 @@ def make_wds_dataset(
     dataset_size: int,
     shuffle: bool,
     samples_names: bool,
-    transform: Callable[..., torch.Tensor],
+    transform: Optional[Callable[..., torch.Tensor]],
     image_decoder: birder_wds.WDSImageDecoderSpec = "tv",
     channels: int = settings.DEFAULT_NUM_CHANNELS,
     tokenizer: Optional[Tokenizer] = None,
     *,
-    caption_key: str = "txt;json",  # WebDataset picks the first present key, so txt takes precedence over json
-    caption_json_key: str = "caption",
+    caption_key: str = "json;txt",  # WebDataset picks the first present key, so json takes precedence over txt
+    caption_fields: Sequence[str] = ("caption",),
+    random_caption: bool = False,
     cache_dir: Optional[str] = None,
     shuffle_buffer_size: Optional[int] = None,
     shuffle_initial_size: Optional[int] = None,
@@ -79,7 +73,7 @@ def make_wds_dataset(
 
     dataset = dataset.with_length(dataset_size, silent=True).decode(decoder).to_tuple(*return_keys)
 
-    caption_decoder = partial(decode_caption, caption_json_key=caption_json_key)
+    caption_decoder = partial(decode_caption, caption_fields=caption_fields, random_caption=random_caption)
     if samples_names is True:
         dataset = dataset.map(birder_wds.decode_sample_name)
         dataset = dataset.map_tuple(birder_wds.identity, transform, caption_decoder)

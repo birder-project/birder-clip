@@ -5,6 +5,7 @@ This module provides ZeroShotInferenceDataParallel, a CLIP-style zero-shot
 specialization of Birder's InferenceDataParallel.
 """
 
+from typing import Any
 from typing import Optional
 
 import torch
@@ -66,8 +67,8 @@ class ZeroShotInferenceDataParallel(InferenceDataParallel):
             ZeroShotInference(replica, embeddings) for replica, embeddings in zip(self.replicas, self.text_embeddings)
         ]
 
-    def forward(  # type: ignore[override] # pylint: disable=arguments-differ
-        self, inputs: torch.Tensor, *, tta: bool = False, return_logits: bool = False
+    def forward(
+        self, inputs: torch.Tensor, *, tta: bool = False, return_logits: bool = False, **kwargs: Any
     ) -> torch.Tensor:
         """
         Run zero-shot inference distributed across GPUs
@@ -80,6 +81,8 @@ class ZeroShotInferenceDataParallel(InferenceDataParallel):
             Run inference with oversampling.
         return_logits
             If True, return raw logits instead of probabilities after softmax.
+        **kwargs
+            Additional keyword arguments to pass to the zero-shot inference module.
         """
 
         if len(self.device_ids) == 1:
@@ -87,20 +90,17 @@ class ZeroShotInferenceDataParallel(InferenceDataParallel):
                 inputs,
                 tta=tta,
                 return_logits=return_logits,
+                **kwargs,
             )
             return self._gather([output])
 
-        scattered = self._scatter(inputs, {})
+        scattered = self._scatter(inputs, kwargs)
 
         outputs = []
-        for inference, (input_chunk, _), device_id in zip(self.inference_modules, scattered, self.device_ids):
+        for inference, (input_chunk, kwargs_chunk), device in zip(self.inference_modules, scattered, self.devices):
             if input_chunk is not None and input_chunk.size(0) > 0:
-                with torch.cuda.device(device_id):
-                    output = inference(
-                        input_chunk,
-                        tta=tta,
-                        return_logits=return_logits,
-                    )
+                with torch.cuda.device(device):
+                    output = inference(input_chunk, tta=tta, return_logits=return_logits, **kwargs_chunk)
                     outputs.append(output)
             else:
                 outputs.append(None)

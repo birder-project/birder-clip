@@ -1,3 +1,4 @@
+import random
 import unittest
 from pathlib import Path
 
@@ -39,6 +40,29 @@ class TestDatasets(unittest.TestCase):
         self.assertEqual(image, str(FIXTURES_DIR / "images/bird2.jpeg") + ".data")
         self.assertSequenceEqual(text.shape, (tokenizer.context_length,))
         self.assertEqual(text.dtype, torch.long)
+
+    def test_csv_caption_fields(self) -> None:
+        dataset = ImageTextCsvDataset(
+            [FIXTURES_DIR / "image_text.csv"],
+            loader=lambda x: x,
+            caption_fields=["caption_visual", "caption"],
+        )
+        self.assertEqual(dataset[0][2], "a bird on a branch")
+        self.assertEqual(dataset[0][2], "a bird on a branch")
+        self.assertEqual(dataset[1][2], "a photo of a hawk")
+
+    def test_csv_random_caption(self) -> None:
+        self.addCleanup(random.setstate, random.getstate())
+        random.seed(0)
+        dataset = ImageTextCsvDataset(
+            [FIXTURES_DIR / "image_text.csv"],
+            loader=lambda x: x,
+            caption_fields=["caption_visual", "caption"],
+            random_caption=True,
+        )
+        captions = {dataset[0][2] for _ in range(32)}
+        self.assertSetEqual(captions, {"a bird on a branch", "a photo of a falcon"})
+        self.assertEqual(dataset[1][2], "a photo of a hawk")
 
     def test_fake_image_text_data(self) -> None:
         tokenizer = get_tokenizer("simple_tokenizer")

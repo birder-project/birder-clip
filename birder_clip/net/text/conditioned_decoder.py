@@ -76,7 +76,7 @@ class CrossAttention(nn.Module):
         q = self.q_norm(q)
         k = self.k_norm(k)
 
-        target = F.scaled_dot_product_attention(  # pylint: disable=not-callable
+        target = F.scaled_dot_product_attention(
             q, k, v, attn_mask=attn_mask, dropout_p=self.attn_drop.p if self.training else 0.0, scale=self.scale
         )
         target = target.transpose(1, 2).reshape(B, N, C)

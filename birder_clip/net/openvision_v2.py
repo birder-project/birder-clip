@@ -49,10 +49,12 @@ class OpenVision_v2(BaseNet, CaptionGeneratorMixin):
         image_encoder.strip_for_forward_features()
 
         decoder_model_config = {
+            "pos_embedding": False,
             "kv_dim": image_encoder.feature_dim,
-            "shift_input_tokens": True,
-            "act_layer_type": "gelu_tanh",
             "norm_layer_eps": 1e-6,
+            "act_layer_type": "gelu_tanh",
+            "prefix_attention": True,
+            "shift_input_tokens": True,
             **decoder_config.get("config", {}),
         }
         text_decoder = registry.text_decoder_factory(
@@ -93,37 +95,77 @@ class OpenVision_v2(BaseNet, CaptionGeneratorMixin):
             use_reentrant=use_reentrant,
         )
 
-    def _encode_image_tokens(self, image: torch.Tensor) -> torch.Tensor:
-        image_features_raw = self.image_encoder.forward_features(image)
+    def _encode_image_tokens(
+        self,
+        image: torch.Tensor,
+        *,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if grid_sizes is None:
+            image_features_raw = self.image_encoder.forward_features(image)
+        else:
+            image_features_raw = self.image_encoder.forward_features(  # type: ignore[call-arg]
+                image, grid_sizes=grid_sizes, valid_mask=valid_mask
+            )
+
         return self.image_encoder.flatten_features(image_features_raw, include_special_tokens=False)
 
-    def _sample_image_tokens(self, image_tokens: torch.Tensor) -> torch.Tensor:
+    def _sample_image_tokens(
+        self, image_tokens: torch.Tensor, valid_mask: Optional[torch.Tensor] = None
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         if self.training is False or self.keep_ratio >= 1.0:
-            return image_tokens
+            return image_tokens, valid_mask
 
         num_tokens = image_tokens.size(1)
         num_keep = max(1, int(num_tokens * self.keep_ratio))
         if num_keep >= num_tokens:
-            return image_tokens
+            return image_tokens, valid_mask
 
-        _, ids_keep, _ = uniform_mask(
-            image_tokens.size(0),
-            1,
-            num_tokens,
-            mask_ratio=1.0 - (num_keep / num_tokens),
-            device=image_tokens.device,
+        if valid_mask is None:
+            _, ids_keep, _ = uniform_mask(
+                image_tokens.size(0),
+                1,
+                num_tokens,
+                mask_ratio=1.0 - (num_keep / num_tokens),
+                device=image_tokens.device,
+            )
+        else:
+            keep_counts = (valid_mask.sum(dim=1) * self.keep_ratio).long().clamp(min=1)
+            num_keep = int(keep_counts.max().item())
+            noise = torch.rand(valid_mask.shape, device=image_tokens.device).masked_fill(~valid_mask, float("inf"))
+            ids_keep = noise.argsort(dim=1)[:, :num_keep]
+            valid_mask = torch.arange(num_keep, device=image_tokens.device).unsqueeze(0) < keep_counts.unsqueeze(1)
+
+        image_tokens = torch.gather(
+            image_tokens, dim=1, index=ids_keep.unsqueeze(-1).expand(-1, -1, image_tokens.size(2))
         )
+        return image_tokens, valid_mask
 
-        return torch.gather(image_tokens, dim=1, index=ids_keep.unsqueeze(-1).expand(-1, -1, image_tokens.size(2)))
+    def forward_caption_features(
+        self,
+        image: torch.Tensor,
+        text: torch.Tensor,
+        *,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        image_tokens = self._encode_image_tokens(image, grid_sizes=grid_sizes, valid_mask=valid_mask)
+        image_tokens, valid_mask = self._sample_image_tokens(image_tokens, valid_mask)
 
-    def forward_caption_features(self, image: torch.Tensor, text: torch.Tensor) -> torch.Tensor:
-        image_tokens = self._encode_image_tokens(image)
-        image_tokens = self._sample_image_tokens(image_tokens)
+        return self.text_decoder.forward_features(text, image_tokens, image_valid_mask=valid_mask)
 
-        return self.text_decoder.forward_features(text, image_tokens)
-
-    def forward_caption_logits(self, image: torch.Tensor, text: torch.Tensor) -> torch.Tensor:
-        return self.text_decoder.forward_head(self.forward_caption_features(image, text))
+    def forward_caption_logits(
+        self,
+        image: torch.Tensor,
+        text: torch.Tensor,
+        *,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return self.text_decoder.forward_head(
+            self.forward_caption_features(image, text, grid_sizes=grid_sizes, valid_mask=valid_mask)
+        )
 
     @torch.no_grad()  # type: ignore[untyped-decorator]
     def generate(
@@ -132,13 +174,16 @@ class OpenVision_v2(BaseNet, CaptionGeneratorMixin):
         input_ids: Optional[torch.LongTensor] = None,
         start_token_id: Optional[int] = None,
         generation_config: Optional[GenerationConfig] = None,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
         **kwargs: Any,
     ) -> torch.LongTensor | GenerateOutput:
         input_ids = self.prepare_generation_input_ids(image, input_ids, start_token_id)
-        image_tokens = self._encode_image_tokens(image)
+        image_tokens = self._encode_image_tokens(image, grid_sizes=grid_sizes, valid_mask=valid_mask)
 
         def forward(input_ids: torch.LongTensor) -> torch.Tensor:
             current_image_tokens = image_tokens
+            current_valid_mask = valid_mask
             if current_image_tokens.size(0) != input_ids.size(0):
                 if input_ids.size(0) % current_image_tokens.size(0) != 0:
                     raise ValueError(
@@ -148,11 +193,15 @@ class OpenVision_v2(BaseNet, CaptionGeneratorMixin):
 
                 repeat_count = input_ids.size(0) // current_image_tokens.size(0)
                 current_image_tokens = current_image_tokens.repeat_interleave(repeat_count, dim=0)
+                if current_valid_mask is not None:
+                    current_valid_mask = current_valid_mask.repeat_interleave(repeat_count, dim=0)
 
             if self.text_decoder.shift_input_tokens is True:
                 input_ids = torch.concat([input_ids, input_ids.new_zeros((input_ids.size(0), 1))], dim=1)
 
-            features = self.text_decoder.forward_features(input_ids, current_image_tokens)
+            features = self.text_decoder.forward_features(
+                input_ids, current_image_tokens, image_valid_mask=current_valid_mask
+            )
 
             return self.text_decoder.forward_head(features)
 
@@ -166,9 +215,15 @@ class OpenVision_v2(BaseNet, CaptionGeneratorMixin):
         )
 
     def forward(
-        self, image: torch.Tensor, text: torch.Tensor, *, return_features: bool = False
+        self,
+        image: torch.Tensor,
+        text: torch.Tensor,
+        *,
+        return_features: bool = False,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor | dict[str, Optional[torch.Tensor]]:
-        features = self.forward_caption_features(image, text)
+        features = self.forward_caption_features(image, text, grid_sizes=grid_sizes, valid_mask=valid_mask)
         logits = self.text_decoder.forward_head(features)
         if return_features is True:
             return {"features": features, "logits": logits}
@@ -215,6 +270,22 @@ registry.register_model_config(
     config={
         "decoder": {
             "network": "visual_causal_text_decoder_l",
+            "context_length": 128,
+        },
+        "tokenizer": "openvision_v2",
+    },
+)
+registry.register_model_config(
+    "openvision_v2_vit_l14",
+    OpenVision_v2,
+    config={
+        "image": {
+            "network": "vit_reg1_l14_nap_avg",
+            "config": {"head_bias": False},
+            "size": (336, 336),
+        },
+        "decoder": {
+            "network": "visual_causal_text_decoder",
             "context_length": 128,
         },
         "tokenizer": "openvision_v2",

@@ -20,6 +20,7 @@ class VisualCausalTextDecoder(VisualCausalTextDecoderBaseNet):
         super().__init__(config=config, context_length=context_length)
         assert self.config is not None, "must set config"
 
+        pos_embedding: bool = self.config.get("pos_embedding", True)
         vocab_size: int = self.config.get("vocab_size", 32000)
         hidden_dim: int = self.config.get("hidden_dim", 768)
         num_heads: int = self.config.get("num_heads", 12)
@@ -35,6 +36,7 @@ class VisualCausalTextDecoder(VisualCausalTextDecoderBaseNet):
         qkv_bias: bool = self.config.get("qkv_bias", True)
         qk_norm: bool = self.config.get("qk_norm", False)
         pre_norm: bool = self.config.get("pre_norm", False)
+        prefix_attention: bool = self.config.get("prefix_attention", False)
         image_projection_bias: bool = self.config.get("image_projection_bias", False)
         lm_head_bias: bool = self.config.get("lm_head_bias", False)
         layer_scale_init_value: Optional[float] = self.config.get("layer_scale_init_value", None)
@@ -54,10 +56,15 @@ class VisualCausalTextDecoder(VisualCausalTextDecoderBaseNet):
         self.num_heads = num_heads
         self.num_layers = num_layers
         self.kv_dim = kv_dim
-        self.causal_mask = True
+        self.prefix_attention = prefix_attention
         self.shift_input_tokens = shift_input_tokens
+
         self.token_embedding = nn.Embedding(vocab_size, hidden_dim)
-        self.pos_embedding = nn.Parameter(torch.empty(1, self.context_length, hidden_dim))
+        if pos_embedding is True:
+            self.pos_embedding = nn.Parameter(torch.empty(1, self.context_length, hidden_dim))
+        else:
+            self.pos_embedding = None
+
         self.image_projection = nn.Linear(kv_dim, hidden_dim, bias=image_projection_bias)
 
         dpr = stochastic_depth_rates(drop_path_rate, num_layers)
@@ -77,14 +84,17 @@ class VisualCausalTextDecoder(VisualCausalTextDecoderBaseNet):
             norm_layer=norm_layer,
             norm_layer_eps=norm_layer_eps,
         )
-        self.decoder.set_causal_attention()
+        if self.prefix_attention is False:
+            self.decoder.set_causal_attention()
 
         self.norm = norm_layer(hidden_dim, eps=norm_layer_eps)
         self.lm_head = nn.Linear(hidden_dim, vocab_size, bias=lm_head_bias)
 
         # Weights initialization
         nn.init.normal_(self.token_embedding.weight, std=0.02)
-        nn.init.normal_(self.pos_embedding, std=0.01)
+        if self.pos_embedding is not None:
+            nn.init.normal_(self.pos_embedding, std=0.01)
+
         nn.init.normal_(self.image_projection.weight, std=kv_dim**-0.5)
         if self.image_projection.bias is not None:
             nn.init.zeros_(self.image_projection.bias)
@@ -121,22 +131,40 @@ class VisualCausalTextDecoder(VisualCausalTextDecoderBaseNet):
         if self.shift_input_tokens is True:
             text_embeddings = text_embeddings[:, :-1]
 
-        seq_len = text_embeddings.size(1)
-        pos_embedding = self.pos_embedding[:, :seq_len, :].to(dtype=text_embeddings.dtype)
+        if self.pos_embedding is not None:
+            seq_len = text_embeddings.size(1)
+            pos_embedding = self.pos_embedding[:, :seq_len, :].to(dtype=text_embeddings.dtype)
+            text_embeddings = text_embeddings + pos_embedding
 
-        return text_embeddings + pos_embedding
+        return text_embeddings
 
-    def forward_features(self, text: torch.Tensor, image_tokens: torch.Tensor) -> torch.Tensor:
+    def forward_features(
+        self, text: torch.Tensor, image_tokens: torch.Tensor, image_valid_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         text_embeddings = self.token_embedding(text)
-        return self.forward_features_from_embeddings(text_embeddings, image_tokens)
+        return self.forward_features_from_embeddings(text_embeddings, image_tokens, image_valid_mask=image_valid_mask)
 
     def forward_features_from_embeddings(
-        self, text_embeddings: torch.Tensor, image_tokens: torch.Tensor
+        self, text_embeddings: torch.Tensor, image_tokens: torch.Tensor, image_valid_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         text_embeddings = self._prepare_text_embeddings(text_embeddings)
         image_embeddings = self.image_projection(image_tokens)
         combined_embeddings = torch.concat([image_embeddings, text_embeddings], dim=1)
-        features = self.decoder(combined_embeddings)
+        attn_mask: Optional[torch.Tensor] = None
+        if self.prefix_attention is True:
+            sequence_length = combined_embeddings.size(1)
+            attn_mask = torch.ones(
+                (sequence_length, sequence_length), dtype=torch.bool, device=combined_embeddings.device
+            ).tril()
+            image_sequence_length = image_embeddings.size(1)
+            attn_mask[:image_sequence_length, :image_sequence_length] = True
+
+        if image_valid_mask is not None:
+            text_valid_mask = image_valid_mask.new_ones((image_valid_mask.size(0), text_embeddings.size(1)))
+            key_mask = torch.concat([image_valid_mask, text_valid_mask], dim=1)[:, None, None, :]
+            attn_mask = key_mask if attn_mask is None else attn_mask & key_mask
+
+        features = self.decoder(combined_embeddings, attn_mask=attn_mask)
         features = features[:, image_embeddings.size(1) :]
         features = self.norm(features)
 
@@ -150,7 +178,8 @@ class VisualCausalTextDecoder(VisualCausalTextDecoderBaseNet):
             return
 
         super().adjust_context_length(new_context_length)
-        self.pos_embedding = nn.Parameter(adjust_position_embedding(self.pos_embedding, new_context_length))
+        if self.pos_embedding is not None:
+            self.pos_embedding = nn.Parameter(adjust_position_embedding(self.pos_embedding, new_context_length))
 
 
 registry.register_model_config("visual_causal_text_decoder", VisualCausalTextDecoder, config={})

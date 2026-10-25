@@ -1,4 +1,6 @@
 import copy
+import random
+from collections.abc import Sequence
 from typing import Any
 from typing import Optional
 
@@ -176,7 +178,26 @@ def get_image_text_network_config(net: BaseNet, signature: SignatureType, rgb_st
 def get_pretrained_model_url(weights: str, file_format: str) -> tuple[str, str]:
     model_metadata = registry.get_pretrained_metadata(weights)
     model_file = f"{weights}.{file_format}"
-    base_url = model_metadata.get("url", settings.REGISTRY_BASE_UTL)
+    base_url = model_metadata.get("url", settings.REGISTRY_BASE_URL)
     url = f"{base_url}/{model_file}"
 
     return (model_file, url)
+
+
+def select_caption(captions: Sequence[Optional[bytes | str]], random_caption: bool = False) -> str:
+    available = []
+    for caption in captions:
+        if caption is None:
+            continue
+        if isinstance(caption, bytes):
+            caption = caption.decode("utf-8")
+        if len(caption.strip()) > 0:
+            available.append(caption)
+
+    if len(available) == 0:
+        raise ValueError("Sample has no non-empty caption in the configured fields")
+
+    if random_caption is True and len(available) > 1:
+        return random.choice(available)
+
+    return available[0]

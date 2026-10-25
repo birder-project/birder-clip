@@ -76,7 +76,7 @@ class CoCaAttentionPool(nn.Module):
 
         nn.init.zeros_(self.proj.bias)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, valid_mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         B, N, _ = x.size()
 
         x = self.context_norm(x)
@@ -86,7 +86,8 @@ class CoCaAttentionPool(nn.Module):
         kv = self.kv(x).reshape(B, N, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         k, v = kv.unbind(0)
 
-        x = F.scaled_dot_product_attention(q, k, v, scale=self.scale)  # pylint: disable=not-callable
+        attn_mask = None if valid_mask is None else valid_mask[:, None, None, :]
+        x = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, scale=self.scale)
         x = x.transpose(1, 2).reshape(B, self.latent_len, self.dim)
         x = self.proj(x)
 
@@ -117,8 +118,7 @@ class CoCa(BaseNet, CaptionGeneratorMixin, ZeroShotMixin):
             config=image_config.get("config", None),
             size=image_config.get("size", None),
         )
-        # TODO: Use strip_for_forward_features once Birder provides no-post-norm ViT variants for CoCa.
-        image_encoder.strip_for_detection_features()
+        image_encoder.strip_for_forward_features()
         text_encoder = registry.text_encoder_factory(
             text_config["network"],
             config=text_config.get("config", None),
@@ -222,11 +222,29 @@ class CoCa(BaseNet, CaptionGeneratorMixin, ZeroShotMixin):
             use_reentrant=use_reentrant,
         )
 
-    def _encode_image(self, image: torch.Tensor, normalize: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
-        image_features_raw = self.image_encoder.forward_features(image)
+    def _encode_image(
+        self,
+        image: torch.Tensor,
+        normalize: bool = False,
+        *,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if grid_sizes is None:
+            image_features_raw = self.image_encoder.forward_features(image)
+        else:
+            image_features_raw = self.image_encoder.forward_features(  # type: ignore[call-arg]
+                image, grid_sizes=grid_sizes, valid_mask=valid_mask
+            )
+
         image_tokens = self.image_encoder.flatten_features(image_features_raw)
+        image_valid_mask = None
+        if grid_sizes is not None:
+            num_special_tokens = image_tokens.size(1) - valid_mask.size(1)  # type: ignore[union-attr]
+            image_valid_mask = F.pad(valid_mask, (num_special_tokens, 0), value=True)
+
         image_tokens = self.visual_pre_norm(image_tokens)
-        image_tokens = self.visual_pool(image_tokens)
+        image_tokens = self.visual_pool(image_tokens, valid_mask=image_valid_mask)
         if self.visual_contrastive_pool is None:
             image_tokens = self.visual_norm(image_tokens)
             image_features = self.visual_projection(image_tokens[:, 0])
@@ -247,8 +265,15 @@ class CoCa(BaseNet, CaptionGeneratorMixin, ZeroShotMixin):
 
         return text_features, text_tokens
 
-    def encode_image(self, image: torch.Tensor, normalize: bool = False) -> torch.Tensor:
-        image_features, _ = self._encode_image(image, normalize=normalize)
+    def encode_image(
+        self,
+        image: torch.Tensor,
+        normalize: bool = False,
+        *,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        image_features, _ = self._encode_image(image, normalize=normalize, grid_sizes=grid_sizes, valid_mask=valid_mask)
 
         return image_features
 
@@ -264,15 +289,31 @@ class CoCa(BaseNet, CaptionGeneratorMixin, ZeroShotMixin):
 
         return logits
 
-    def forward_caption_features(self, image: torch.Tensor, text: torch.Tensor) -> torch.Tensor:
-        _, image_tokens = self._encode_image(image)
+    def forward_caption_features(
+        self,
+        image: torch.Tensor,
+        text: torch.Tensor,
+        *,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        _, image_tokens = self._encode_image(image, grid_sizes=grid_sizes, valid_mask=valid_mask)
         _, text_tokens = self._encode_text(text)
         decoder_text_tokens = self.text_encoder.tokens_from_features(text_tokens)
 
         return self.text_decoder.forward_features_from_embeddings(decoder_text_tokens, image_tokens)
 
-    def forward_caption_logits(self, image: torch.Tensor, text: torch.Tensor) -> torch.Tensor:
-        return self.text_decoder.forward_head(self.forward_caption_features(image, text))
+    def forward_caption_logits(
+        self,
+        image: torch.Tensor,
+        text: torch.Tensor,
+        *,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        return self.text_decoder.forward_head(
+            self.forward_caption_features(image, text, grid_sizes=grid_sizes, valid_mask=valid_mask)
+        )
 
     @torch.no_grad()  # type: ignore[untyped-decorator]
     def generate(
@@ -281,10 +322,12 @@ class CoCa(BaseNet, CaptionGeneratorMixin, ZeroShotMixin):
         input_ids: Optional[torch.LongTensor] = None,
         start_token_id: Optional[int] = None,
         generation_config: Optional[GenerationConfig] = None,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
         **kwargs: Any,
     ) -> torch.LongTensor | GenerateOutput:
         input_ids = self.prepare_generation_input_ids(image, input_ids, start_token_id)
-        _, image_tokens = self._encode_image(image)
+        _, image_tokens = self._encode_image(image, grid_sizes=grid_sizes, valid_mask=valid_mask)
 
         def forward(input_ids: torch.LongTensor) -> torch.Tensor:
             current_image_tokens = image_tokens
@@ -316,9 +359,17 @@ class CoCa(BaseNet, CaptionGeneratorMixin, ZeroShotMixin):
         )
 
     def forward(
-        self, image: torch.Tensor, text: torch.Tensor, *, return_features: bool = False
+        self,
+        image: torch.Tensor,
+        text: torch.Tensor,
+        *,
+        return_features: bool = False,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor | dict[str, Optional[torch.Tensor]]:
-        image_features, image_tokens = self._encode_image(image, normalize=True)
+        image_features, image_tokens = self._encode_image(
+            image, normalize=True, grid_sizes=grid_sizes, valid_mask=valid_mask
+        )
         text_features, text_tokens = self._encode_text(text, normalize=True)
         if return_features is True:
             decoder_text_tokens = self.text_encoder.tokens_from_features(text_tokens)
@@ -447,7 +498,7 @@ registry.register_model_config(
     CoCa,
     config={
         "image": {
-            "network": "vit_b32_pn",
+            "network": "vit_b32_pn_npn",
             "size": (224, 224),
         },
         "text": {
@@ -480,7 +531,7 @@ registry.register_model_config(
     CoCa,
     config={
         "image": {
-            "network": "vit_b32_pn",
+            "network": "vit_b32_pn_npn",
             "size": (224, 224),
         },
         "text": {
@@ -514,7 +565,7 @@ registry.register_model_config(
     CoCa,
     config={
         "image": {
-            "network": "vit_l14_pn",
+            "network": "vit_l14_pn_npn",
             "size": (224, 224),
         },
         "text": {
@@ -549,7 +600,7 @@ registry.register_model_config(
     OpenCLIPLegacyCoCa,
     config={
         "image": {
-            "network": "vit_b32_pn",
+            "network": "vit_b32_pn_npn",
             "size": (224, 224),
         },
         "text": {
@@ -584,7 +635,7 @@ registry.register_model_config(
     OpenCLIPLegacyCoCa,
     config={
         "image": {
-            "network": "vit_l14_pn",
+            "network": "vit_l14_pn_npn",
             "size": (224, 224),
         },
         "text": {

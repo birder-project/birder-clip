@@ -29,7 +29,15 @@ from birder_clip.tokenizers.base import Tokenizer
 
 
 class ZeroShotInferenceModule(Protocol):
-    def __call__(self, inputs: torch.Tensor, *, tta: bool = False, return_logits: bool = False) -> torch.Tensor: ...
+    def __call__(
+        self,
+        inputs: torch.Tensor,
+        *,
+        tta: bool = False,
+        return_logits: bool = False,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor: ...
 
 
 class ZeroShotInference:
@@ -37,8 +45,23 @@ class ZeroShotInference:
         self.net = net
         self.text_embeddings = text_embeddings
 
-    def __call__(self, inputs: torch.Tensor, *, tta: bool = False, return_logits: bool = False) -> torch.Tensor:
+    def __call__(
+        self,
+        inputs: torch.Tensor,
+        *,
+        tta: bool = False,
+        return_logits: bool = False,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         inputs = inputs.to(self.text_embeddings.device, non_blocking=True)
+        batch_kwargs = {}
+        if grid_sizes is not None:
+            batch_kwargs = {
+                "grid_sizes": grid_sizes.to(self.text_embeddings.device, non_blocking=True),
+                "valid_mask": valid_mask.to(self.text_embeddings.device, non_blocking=True),  # type: ignore[union-attr]
+            }
+
         if tta is True:
             _, _, H, W = inputs.size()
             crop_h = int(H * 0.8)
@@ -56,7 +79,7 @@ class ZeroShotInference:
 
             return torch.stack(outs).mean(dim=0)
 
-        image_embeddings = self.net.encode_image(inputs, normalize=True)
+        image_embeddings = self.net.encode_image(inputs, normalize=True, **batch_kwargs)
         logits = self.net.forward_logits(image_embeddings, self.text_embeddings)
         if return_logits is True:
             return logits
@@ -125,12 +148,20 @@ def infer_dataloader_iter(
     sample_count = 0
     with tqdm(total=num_samples, initial=0, unit="images", unit_scale=True, leave=False) as progress:
         for file_paths, inputs, targets in dataloader:
+            batch_kwargs = {}
+            if isinstance(inputs, (tuple, list)):  # Assumes NaFlex collator inputs
+                inputs, grid_sizes, valid_mask = inputs
+                batch_kwargs = {
+                    "grid_sizes": grid_sizes.to(device, non_blocking=True),
+                    "valid_mask": valid_mask.to(device, non_blocking=True),
+                }
+
             batch_size = inputs.size(0)
 
             # Inference
             inputs = inputs.to(dtype=model_dtype)
             with torch.amp.autocast(device.type, enabled=amp, dtype=amp_dtype):
-                out = net(inputs, return_logits=return_logits, tta=tta)
+                out = net(inputs, return_logits=return_logits, tta=tta, **batch_kwargs)
                 out = out.cpu().float().numpy()
 
             out_list.append(out)

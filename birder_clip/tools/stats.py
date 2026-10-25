@@ -4,6 +4,7 @@ import math
 from collections import Counter
 from collections.abc import Iterable
 from collections.abc import Iterator
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import Optional
@@ -14,8 +15,6 @@ import webdataset as wds
 from birder.common import cli
 from birder.data.datasets.webdataset import wds_args_from_info
 
-from birder_clip.data.datasets.csv import CAPTION_COLUMN
-from birder_clip.data.datasets.webdataset import decode_caption
 from birder_clip.data.datasets.webdataset import prepare_wds_args
 from birder_clip.model_registry import Task
 from birder_clip.model_registry import registry
@@ -95,24 +94,28 @@ def load_tokenizer(tokenizer: str) -> Tokenizer:
     raise cli.ValidationError(f"{tokenizer} is not a registered tokenizer or image-text model")
 
 
-def _iter_csv_captions(data_paths: Iterable[Path], batch_size: int) -> Iterator[str]:
+def _iter_csv_captions(
+    data_paths: Iterable[Path], batch_size: int, caption_fields: Sequence[str]
+) -> Iterator[tuple[str, Optional[str]]]:
     for data_path in data_paths:
         batches = (
             pl.scan_csv(
                 Path(data_path),
-                schema_overrides={CAPTION_COLUMN: pl.String},
+                schema_overrides={field: pl.String for field in caption_fields},
             )
-            .select(CAPTION_COLUMN)
+            .select(caption_fields)
             .collect_batches(chunk_size=batch_size)
         )
 
         for batch in batches:
-            yield from batch.get_column(CAPTION_COLUMN)
+            for row in batch.iter_rows():
+                yield from zip(caption_fields, row)
 
 
-def _iter_wds_captions(wds_path: str | list[str]) -> Iterator[str]:
-    caption_key = "txt;json"
-    caption_json_key = "caption"
+def _iter_wds_captions(
+    wds_path: str | list[str], caption_fields: Sequence[str]
+) -> Iterator[tuple[Optional[str], Optional[bytes | str]]]:
+    caption_key = "json;txt"
     suffixes = tuple(caption_key.split(";"))
 
     dataset = (
@@ -127,11 +130,17 @@ def _iter_wds_captions(wds_path: str | list[str]) -> Iterator[str]:
         .to_tuple(caption_key)
     )
     for (caption,) in dataset:
-        yield decode_caption(caption, caption_json_key=caption_json_key)
+        if isinstance(caption, dict):
+            for field in caption_fields:
+                yield (field, caption.get(field))
+        else:
+            # TXT captions have no field name
+            yield (None, caption)
 
 
 def prompt_tokens(args: argparse.Namespace) -> None:
     tokenizer = load_tokenizer(args.tokenizer)
+    captions: Iterator[tuple[Optional[str], Optional[bytes | str]]]
     if args.wds is True:
         wds_path: str | list[str]
         if args.wds_info is not None:
@@ -140,27 +149,53 @@ def prompt_tokens(args: argparse.Namespace) -> None:
         else:
             wds_path, _ = prepare_wds_args(args.data_path, 0, torch.device("cpu"))
 
-        captions = _iter_wds_captions(wds_path)
+        captions = _iter_wds_captions(wds_path, args.caption_fields)
     else:
-        captions = _iter_csv_captions(args.data_path, args.csv_batch_size)
+        captions = _iter_csv_captions(args.data_path, args.csv_batch_size, args.caption_fields)
 
-    stats = TokenLengthStats(tokenizer.context_length)
-    for caption in captions:
+    stats_by_field: dict[Optional[str], TokenLengthStats] = {
+        field: TokenLengthStats(tokenizer.context_length) for field in args.caption_fields
+    }
+    missing_counts: Counter[Optional[str]] = Counter()
+    for field, caption in captions:
+        if field not in stats_by_field:
+            stats_by_field[field] = TokenLengthStats(tokenizer.context_length)
+
+        stats = stats_by_field[field]
+        if isinstance(caption, bytes):
+            caption = caption.decode("utf-8")
+
+        if caption is None or len(caption.strip()) == 0:
+            missing_counts[field] += 1
+            continue
+
         stats.update(len(tokenizer.encode(caption)) + tokenizer.num_special_tokens)
 
-    logger.info(f"Loaded {stats.count:,} prompts")
-    logger.info(f"Context length: {stats.context_length}")
+    logger.info(f"Context length: {tokenizer.context_length}")
     logger.info(f"Special tokens: {tokenizer.num_special_tokens}")
-    logger.info(f"Min tokens: {stats.min_length:,}")
-    logger.info(f"Max tokens: {stats.max_length:,}")
-    logger.info(f"Mean tokens: {stats.mean():.2f}")
-    logger.info(f"Median tokens: {stats.percentile(50):.2f}")
-    logger.info(f"Std tokens: {stats.std():.2f}")
-    logger.info(f"P95 tokens: {stats.percentile(95):.2f}")
-    logger.info(f"P99 tokens: {stats.percentile(99):.2f}")
-    logger.info(
-        f"Prompts exceeding context length: {stats.overflow_count:,} ({stats.overflow_count / stats.count:.2%})"
-    )
+    for field, stats in stats_by_field.items():
+        logger.info("---")
+        if field is None:
+            logger.info("Caption source: TXT")
+        else:
+            logger.info(f"Caption field: {field}")
+
+        logger.info(f"Loaded {stats.count:,} non-empty prompts")
+        logger.info(f"Missing or empty captions: {missing_counts[field]:,}")
+        if stats.count == 0:
+            logger.warning("No prompts found, skipping token statistics")
+            continue
+
+        logger.info(f"Min tokens: {stats.min_length:,}")
+        logger.info(f"Max tokens: {stats.max_length:,}")
+        logger.info(f"Mean tokens: {stats.mean():.2f}")
+        logger.info(f"Median tokens: {stats.percentile(50):.2f}")
+        logger.info(f"Std tokens: {stats.std():.2f}")
+        logger.info(f"P95 tokens: {stats.percentile(95):.2f}")
+        logger.info(f"P99 tokens: {stats.percentile(99):.2f}")
+        logger.info(
+            f"Prompts exceeding context length: {stats.overflow_count:,} ({stats.overflow_count / stats.count:.2%})"
+        )
 
 
 def set_parser(subparsers: Any) -> None:
@@ -182,6 +217,17 @@ def set_parser(subparsers: Any) -> None:
     subparser.add_argument(
         "--tokenizer", type=str, default="simple_tokenizer", help="tokenizer or image-text model name"
     )
+    subparser.add_argument(
+        "--caption-fields",
+        type=str,
+        nargs="+",
+        default=["caption"],
+        metavar="FIELD",
+        help=(
+            "caption fields (CSV columns or WebDataset JSON keys) to report separately "
+            "(TXT-only samples are reported separately)"
+        ),
+    )
     subparser.add_argument("--data-path", nargs="+", help="image-text CSV file paths")
     subparser.add_argument("--csv-batch-size", type=int, default=50_000, metavar="N", help="CSV read batch size")
     subparser.add_argument("--wds", default=False, action="store_true", help="use webdataset")
@@ -195,6 +241,16 @@ def set_parser(subparsers: Any) -> None:
 
 
 def main(args: argparse.Namespace) -> None:
+    if len(args.caption_fields) == 0 or any(len(field.strip()) == 0 for field in args.caption_fields):
+        raise cli.ValidationError("--caption-fields must contain non-empty field names")
+    if len(set(args.caption_fields)) != len(args.caption_fields):
+        raise cli.ValidationError("--caption-fields must not contain duplicate field names")
+    if args.prompt_tokens is True:
+        if args.wds is False and args.data_path is None:
+            raise cli.ValidationError("--data-path is required")
+        if args.wds is True and args.data_path is None and args.wds_info is None:
+            raise cli.ValidationError("Must provide at least one data source, --data-path or --wds-info")
+
     if args.wds is True and args.data_path is not None and args.wds_info is not None:
         raise cli.ValidationError("--data-path and --wds-info are mutually exclusive when --wds is set")
     if args.wds is True and args.data_path is not None and len(args.data_path) > 1:

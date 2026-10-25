@@ -41,6 +41,7 @@
     "multimodal",
     "multistep",
     "mypy",
+    "naflex",
     "nccl",
     "nesterov",
     "nodesplitter",
@@ -62,6 +63,7 @@
     "torchrun",
     "torchvision",
     "tqdm",
+    "unpatchify",
     "unsqueeze",
     "webdataset",
     "xhigh"

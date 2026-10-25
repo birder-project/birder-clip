@@ -22,14 +22,18 @@ Full training is supported, but for large-scale CLIP pretraining you are probabl
 
 1. Ensure your environment meets the minimum requirements:
    - Python 3.11 or newer
-   - PyTorch 2.10 or newer (installed for your hardware/driver stack)
-   - Birder 0.7.0 or newer
+   - PyTorch 2.14.0 or newer (installed for your hardware/driver stack)
+   - Birder 0.8.3 or newer
 
 1. Install the latest Birder CLIP version:
 
 ```sh
 pip install birder-clip
 ```
+
+Birder CLIP uses [Birder's runtime configuration](https://birder.gitlab.io/birder/configuration/), including
+`birder.toml` and the shared directory and `LOG_LEVEL` environment overrides. Tokenizers are stored in the
+`tokenizers/` subdirectory of the configured `MODELS_DIR`.
 
 ## Getting Started
 

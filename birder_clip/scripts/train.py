@@ -20,19 +20,22 @@ remaining cached features as additional CLIP negatives.
 # Reference license: MIT and Apache-2.0
 
 import argparse
-import json
 import logging
 import math
 import sys
 import time
+from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import nullcontext
+from functools import partial
 from pathlib import Path
 from typing import Any
+from typing import Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.amp
 import torchinfo
 from birder.common import cli
 from birder.common import fs_ops as birder_fs_ops
@@ -40,12 +43,17 @@ from birder.common import fsdp_utils
 from birder.common import training_utils
 from birder.common.lib import format_duration
 from birder.conf import settings
+from birder.data.collators.naflex import NaFlexBatchProcessor
+from birder.data.collators.naflex import NaFlexPathCollator
+from birder.data.collators.naflex import resolve_naflex_batch_specs
 from birder.data.dataloader.webdataset import make_wds_loader
 from birder.data.datasets.directory import get_image_loader
+from birder.data.datasets.naflex import NaFlexMultiScaleDataset
+from birder.data.datasets.webdataset import get_wds_num_shards
 from birder.data.datasets.webdataset import wds_args_from_info
 from birder.data.transforms.classification import get_rgb_stats
 from birder.data.transforms.classification import inference_preset
-from birder.data.transforms.classification import training_preset
+from birder.data.transforms.naflex import inference_preset as naflex_inference_preset
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
@@ -61,6 +69,7 @@ from birder_clip.data.datasets.webdataset import prepare_wds_args
 from birder_clip.loss import CaptionLoss
 from birder_clip.loss import CLIPLoss
 from birder_clip.loss import CoCaLoss
+from birder_clip.model_registry import Task
 from birder_clip.model_registry import registry
 from birder_clip.net import CLIP
 from birder_clip.net import CoCa
@@ -129,27 +138,10 @@ def train(args: argparse.Namespace) -> None:
     logger.info(f"Using size={args.size}")
 
     #
-    # Data
+    # Tokenizer
     #
     rgb_stats = get_rgb_stats(args.rgb_mode, args.rgb_mean, args.rgb_std)
     logger.debug(f"Using RGB stats: {rgb_stats}")
-
-    training_transform = training_preset(
-        size=args.size,
-        aug_type=args.aug_type,
-        level=args.aug_level,
-        rgv_values=rgb_stats,
-        resize_min_scale=args.resize_min_scale,
-        re_prob=args.re_prob,
-        use_grayscale=args.use_grayscale,
-        ra_num_ops=args.ra_num_ops,
-        ra_magnitude=args.ra_magnitude,
-        augmix_severity=args.augmix_severity,
-        clip_color_jitter_prob=args.clip_color_jitter_prob,
-        clip_gray_prob=args.clip_gray_prob,
-        simple_crop=args.simple_crop,
-    )
-    val_transform = inference_preset(args.size, rgb_stats, args.center_crop, args.simple_crop)
 
     if args.tokenizer is None:
         args.tokenizer = registry.get_default_tokenizer(args.network)
@@ -162,163 +154,11 @@ def train(args: argparse.Namespace) -> None:
     logger.info(f"Using context length={args.context_length}")
     tokenizer = get_tokenizer(args.tokenizer, context_length=args.context_length)
 
-    if args.use_fake_data is True:
-        logger.warning("Using fake data")
-        training_dataset = FakeImageTextData(
-            10000, (args.channels, *args.size), num_classes=10, transform=training_transform, tokenizer=tokenizer
-        )
-        validation_dataset = FakeImageTextData(
-            1000, (args.channels, *args.size), num_classes=10, transform=val_transform, tokenizer=tokenizer
-        )
-
-    elif args.wds is True:
-        training_wds_path: str | list[str]
-        val_wds_path: str | list[str]
-        if args.wds_info is not None:
-            training_wds_path, training_size = wds_args_from_info(args.wds_info, args.wds_training_split)
-            val_wds_path, val_size = wds_args_from_info(args.wds_info, args.wds_val_split)
-            if args.wds_train_size is not None:
-                training_size = args.wds_train_size
-            if args.wds_val_size is not None:
-                val_size = args.wds_val_size
-        else:
-            training_wds_path, training_size = prepare_wds_args(args.data_path[0], args.wds_train_size, device)
-            if args.val_path is not None:
-                val_wds_path, val_size = prepare_wds_args(args.val_path[0], args.wds_val_size, device)
-
-        training_dataset = make_wds_dataset(
-            training_wds_path,
-            dataset_size=training_size,
-            shuffle=True,
-            samples_names=True,
-            transform=training_transform,
-            image_decoder=args.img_loader,
-            channels=args.channels,
-            tokenizer=tokenizer,
-            cache_dir=args.wds_cache_dir,
-        )
-        if args.wds_info is not None or args.val_path is not None:
-            validation_dataset = make_wds_dataset(
-                val_wds_path,
-                dataset_size=val_size,  # pylint: disable=possibly-used-before-assignment
-                shuffle=False,
-                samples_names=True,
-                transform=val_transform,
-                image_decoder=args.img_loader,
-                channels=args.channels,
-                tokenizer=tokenizer,
-                cache_dir=args.wds_cache_dir,
-            )
-        else:
-            validation_dataset = None
-
-    else:
-        image_loader = get_image_loader(args.img_loader, args.channels)
-        training_dataset = ImageTextCsvDataset(
-            args.data_path, transforms=training_transform, tokenizer=tokenizer, loader=image_loader
-        )
-        if args.val_path is not None:
-            validation_dataset = ImageTextCsvDataset(
-                args.val_path, transforms=val_transform, tokenizer=tokenizer, loader=image_loader
-            )
-        else:
-            validation_dataset = None
-
-    logger.info(f"Using device {device}:{device_id}")
-    logger.info(f"Training dataset has {len(training_dataset):,} samples")
-    if validation_dataset is not None:
-        logger.info(f"Validation dataset has {len(validation_dataset):,} samples")
-
     batch_size: int = args.batch_size
     grad_accum_steps: int = args.grad_accum_steps
     grad_accum_cache_negatives: bool = args.grad_accum_cache_negatives
     model_ema_steps: int = args.model_ema_steps
-    logger.info(f"Effective batch size = {batch_size * grad_accum_steps * args.world_size}")
-
-    # Data loaders and samplers
-    virtual_epoch_mode = args.steps_per_epoch is not None
-    train_sampler, validation_sampler = training_utils.get_samplers(
-        args, training_dataset, validation_dataset, device=device, infinite=virtual_epoch_mode
-    )
-
-    if args.wds is True:
-        training_loader = make_wds_loader(
-            training_dataset,
-            batch_size,
-            num_workers=args.num_workers,
-            prefetch_factor=args.prefetch_factor,
-            collate_fn=None,
-            world_size=args.world_size,
-            pin_memory=args.pin_memory,
-            drop_last=args.drop_last,
-            persistent_workers=args.persistent_workers,
-            shuffle=args.wds_extra_shuffle,
-            infinite=virtual_epoch_mode,
-        )
-        if validation_dataset is not None:
-            validation_loader = make_wds_loader(
-                validation_dataset,
-                batch_size,
-                num_workers=args.num_workers,
-                prefetch_factor=args.prefetch_factor,
-                collate_fn=None,
-                world_size=args.world_size,
-                pin_memory=args.pin_memory,
-                persistent_workers=args.persistent_workers,
-            )
-        else:
-            validation_loader = None
-
-    else:
-        training_loader = DataLoader(
-            training_dataset,
-            batch_size=batch_size,
-            sampler=train_sampler,
-            num_workers=args.num_workers,
-            prefetch_factor=args.prefetch_factor,
-            pin_memory=args.pin_memory,
-            drop_last=args.drop_last,
-            persistent_workers=args.persistent_workers,
-        )
-        if validation_dataset is not None:
-            validation_loader = DataLoader(
-                validation_dataset,
-                batch_size=batch_size,
-                sampler=validation_sampler,
-                num_workers=args.num_workers,
-                prefetch_factor=args.prefetch_factor,
-                pin_memory=args.pin_memory,
-                persistent_workers=args.persistent_workers,
-            )
-        else:
-            validation_loader = None
-
-    if virtual_epoch_mode is True:
-        optimizer_steps_per_epoch = args.steps_per_epoch
-        epoch_num_batches = args.steps_per_epoch * grad_accum_steps
-        epoch_samples = epoch_num_batches * batch_size * args.world_size
-        logger.debug(f"Virtual epoch has {epoch_samples:,} samples")
-    else:
-        optimizer_steps_per_epoch = math.ceil(len(training_loader) / grad_accum_steps)
-        epoch_num_batches = len(training_loader)
-        epoch_samples = len(training_dataset)
-
-    assert args.model_ema is False or model_ema_steps <= optimizer_steps_per_epoch
-
-    last_batch_idx = epoch_num_batches - 1
-    last_accum_steps = epoch_num_batches % grad_accum_steps
-    if last_accum_steps == 0:
-        last_accum_steps = grad_accum_steps
-
-    last_accum_start_idx = epoch_num_batches - last_accum_steps
-    begin_epoch = 1
-    epochs = args.epochs + 1
-    args.stop_epoch = training_utils.normalize_stop_epoch(epochs, args.stop_epoch)
-
-    logger.debug(
-        f"Epoch has {epoch_num_batches} iterations ({optimizer_steps_per_epoch} steps), "
-        f"virtual mode={virtual_epoch_mode}"
-    )
+    logger.debug(f"Effective batch size = {batch_size * grad_accum_steps * args.world_size}")
 
     #
     # Initialize network
@@ -341,6 +181,8 @@ def train(args: argparse.Namespace) -> None:
         embed_dim=args.embed_dim,
         tokenizer=args.tokenizer,
     )
+
+    begin_epoch = 1
 
     registered_config = registry.all_nets[args.network.lower()].config  # type: ignore[misc]
     model_config = lib.get_image_text_model_config(
@@ -457,6 +299,13 @@ def train(args: argparse.Namespace) -> None:
                     f"pad_token_id ({net.text_encoder.pad_token_id})"
                 )
 
+    if args.naflex is True:
+        patch_size = net.image_encoder.stem_stride
+        if args.naflex_patch_sizes is not None:
+            net.image_encoder.set_naflex_patch_resampling()
+
+        validation_max_seq_len = resolve_naflex_batch_specs(args.size, patch_size)[0].max_seq_len
+
     net.to(device, dtype=model_dtype)
     if args.freeze_image_encoder is True:
         net.image_encoder.freeze(freeze_classifier=False)
@@ -485,23 +334,237 @@ def train(args: argparse.Namespace) -> None:
         net = torch.compile(net, fullgraph=args.compile_fullgraph, mode=args.compile_mode)
 
     #
+    # Data
+    #
+    logger.info(f"Using caption fields={args.caption_fields}")
+    collate_fn: Optional[Callable[[Any], Any]] = None
+    validation_collate_fn: Optional[Callable[[Any], Any]] = None
+    naflex_batch_processor: Optional[NaFlexBatchProcessor] = None
+    wds_num_shards: Optional[int] = None
+    if args.naflex is True:
+        naflex_specs = resolve_naflex_batch_specs(args.size, patch_size, args.naflex_sizes, args.naflex_patch_sizes)
+    else:
+        naflex_specs = ()
+
+    if len(set(naflex_specs)) > 1:
+        naflex_transforms = {spec: training_utils.get_naflex_training_transform(args, spec) for spec in naflex_specs}
+        logger.debug(f"Using NaFlex batch specifications: {list(naflex_specs)}")
+
+        training_transform = None
+        naflex_batch_processor = NaFlexBatchProcessor(
+            NaFlexPathCollator(), naflex_specs, naflex_transforms, seed=args.seed or 0
+        )
+
+    elif args.naflex is True:
+        spec = naflex_specs[0]
+        training_transform = training_utils.get_naflex_training_transform(args, spec)
+    else:
+        training_transform = training_utils.get_training_transform(args)
+
+    if args.naflex is True:
+        val_transform = naflex_inference_preset(patch_size, validation_max_seq_len, rgb_stats, args.center_crop)
+    else:
+        val_transform = inference_preset(args.size, rgb_stats, args.center_crop, args.simple_crop)
+
+    if args.naflex is True:
+        validation_collate_fn = NaFlexPathCollator(patch_size)
+        if naflex_batch_processor is None:
+            spec = naflex_specs[0]
+            collate_fn = NaFlexPathCollator(spec.patch_size)
+
+    else:
+        collate_fn = None
+        validation_collate_fn = None
+
+    if args.use_fake_data is True:
+        logger.warning("Using fake data")
+        training_dataset = FakeImageTextData(
+            10000, (args.channels, *args.size), num_classes=10, transform=training_transform, tokenizer=tokenizer
+        )
+        validation_dataset = FakeImageTextData(
+            1000, (args.channels, *args.size), num_classes=10, transform=val_transform, tokenizer=tokenizer
+        )
+
+    elif args.wds is True:
+        training_wds_path: str | list[str]
+        val_wds_path: str | list[str]
+        if args.wds_info is not None:
+            training_wds_path, training_size = wds_args_from_info(args.wds_info, args.wds_training_split)
+            val_wds_path, val_size = wds_args_from_info(args.wds_info, args.wds_val_split)
+            if args.wds_train_size is not None:
+                training_size = args.wds_train_size
+            if args.wds_val_size is not None:
+                val_size = args.wds_val_size
+        else:
+            training_wds_path, training_size = prepare_wds_args(args.data_path[0], args.wds_train_size, device)
+            if args.val_path is not None:
+                val_wds_path, val_size = prepare_wds_args(args.val_path[0], args.wds_val_size, device)
+
+        training_dataset = make_wds_dataset(
+            training_wds_path,
+            dataset_size=training_size,
+            shuffle=True,
+            samples_names=True,
+            transform=training_transform,
+            image_decoder=args.img_loader,
+            channels=args.channels,
+            tokenizer=tokenizer,
+            caption_fields=args.caption_fields,
+            random_caption=True,
+            cache_dir=args.wds_cache_dir,
+        )
+        if args.wds_info is not None or args.val_path is not None:
+            validation_dataset = make_wds_dataset(
+                val_wds_path,
+                dataset_size=val_size,  # pylint: disable=possibly-used-before-assignment
+                shuffle=False,
+                samples_names=True,
+                transform=val_transform,
+                image_decoder=args.img_loader,
+                channels=args.channels,
+                tokenizer=tokenizer,
+                caption_fields=args.caption_fields,
+                cache_dir=args.wds_cache_dir,
+            )
+        else:
+            validation_dataset = None
+
+        if naflex_batch_processor is not None:
+            wds_num_shards = get_wds_num_shards(training_dataset)
+
+    else:
+        image_loader = get_image_loader(args.img_loader, args.channels)
+        training_dataset = ImageTextCsvDataset(
+            args.data_path,
+            transforms=training_transform,
+            tokenizer=tokenizer,
+            loader=image_loader,
+            caption_fields=args.caption_fields,
+            random_caption=True,
+        )
+        if args.val_path is not None:
+            validation_dataset = ImageTextCsvDataset(
+                args.val_path,
+                transforms=val_transform,
+                tokenizer=tokenizer,
+                loader=image_loader,
+                caption_fields=args.caption_fields,
+            )
+        else:
+            validation_dataset = None
+
+    if args.wds is False and naflex_batch_processor is not None:
+        training_dataset = NaFlexMultiScaleDataset(training_dataset, naflex_batch_processor)
+        collate_fn = naflex_batch_processor.base_collator
+
+    logger.info(f"Using device {device}:{device_id}")
+    logger.info(f"Training dataset has {len(training_dataset):,} samples")
+    if validation_dataset is not None:
+        logger.info(f"Validation dataset has {len(validation_dataset):,} samples")
+
+    # Data loaders and samplers
+    virtual_epoch_mode = args.steps_per_epoch is not None
+    train_sampler, validation_sampler = training_utils.get_samplers(
+        args, training_dataset, validation_dataset, device=device, infinite=virtual_epoch_mode
+    )
+
+    if args.wds is True:
+        wds_batcher: Optional[Callable[..., Iterator[tuple[Any, ...]]]] = None
+        if naflex_batch_processor is not None:
+            wds_batcher = partial(
+                naflex_batch_processor.iter_batches,
+                batch_size=batch_size,
+                drop_last=args.drop_last,
+            )
+
+        training_loader = make_wds_loader(
+            training_dataset,
+            batch_size,
+            num_workers=args.num_workers,
+            prefetch_factor=args.prefetch_factor,
+            collate_fn=None if naflex_batch_processor is not None else collate_fn,
+            world_size=args.world_size,
+            pin_memory=args.pin_memory,
+            drop_last=args.drop_last,
+            persistent_workers=args.persistent_workers,
+            shuffle=args.wds_extra_shuffle,
+            infinite=virtual_epoch_mode,
+            batcher=wds_batcher,
+            num_shards=wds_num_shards,
+        )
+        if validation_dataset is not None:
+            validation_loader = make_wds_loader(
+                validation_dataset,
+                batch_size,
+                num_workers=args.num_workers,
+                prefetch_factor=args.prefetch_factor,
+                collate_fn=validation_collate_fn,
+                world_size=args.world_size,
+                pin_memory=args.pin_memory,
+                persistent_workers=args.persistent_workers,
+            )
+        else:
+            validation_loader = None
+
+    else:
+        training_loader = DataLoader(
+            training_dataset,
+            batch_size=batch_size,
+            sampler=train_sampler,
+            num_workers=args.num_workers,
+            prefetch_factor=args.prefetch_factor,
+            collate_fn=collate_fn,
+            pin_memory=args.pin_memory,
+            drop_last=args.drop_last,
+            persistent_workers=args.persistent_workers,
+        )
+        if validation_dataset is not None:
+            validation_loader = DataLoader(
+                validation_dataset,
+                batch_size=batch_size,
+                sampler=validation_sampler,
+                num_workers=args.num_workers,
+                prefetch_factor=args.prefetch_factor,
+                collate_fn=validation_collate_fn,
+                pin_memory=args.pin_memory,
+                persistent_workers=args.persistent_workers,
+            )
+        else:
+            validation_loader = None
+
+    if virtual_epoch_mode is True:
+        optimizer_steps_per_epoch = args.steps_per_epoch
+        epoch_num_batches = args.steps_per_epoch * grad_accum_steps
+        epoch_samples = epoch_num_batches * batch_size * args.world_size
+        logger.debug(f"Virtual epoch has {epoch_samples:,} samples")
+    else:
+        optimizer_steps_per_epoch = math.ceil(len(training_loader) / grad_accum_steps)
+        epoch_num_batches = len(training_loader)
+        epoch_samples = len(training_dataset)
+
+    assert args.model_ema is False or model_ema_steps <= optimizer_steps_per_epoch
+
+    last_batch_idx = epoch_num_batches - 1
+    last_accum_steps = epoch_num_batches % grad_accum_steps
+    if last_accum_steps == 0:
+        last_accum_steps = grad_accum_steps
+
+    last_accum_start_idx = epoch_num_batches - last_accum_steps
+    epochs = args.epochs + 1
+    args.stop_epoch = training_utils.normalize_stop_epoch(epochs, args.stop_epoch)
+
+    logger.debug(
+        f"Epoch has {epoch_num_batches} iterations ({optimizer_steps_per_epoch} steps), "
+        f"virtual mode={virtual_epoch_mode}"
+    )
+    training_epochs = max(0, args.stop_epoch - begin_epoch)
+
+    # Approximate total: does not account for --drop-last or sampler padding
+    logger.info(f"Training will process {epoch_samples * training_epochs:,} samples over {training_epochs} epochs")
+
+    #
     # Loss criteria, optimizer, learning rate scheduler and training parameter groups
     #
-
-    # Loss criteria
-    if args.loss == "clip":
-        criterion = CLIPLoss()
-    elif args.loss == "coca":
-        criterion = CoCaLoss(
-            caption_loss_weight=args.coca_caption_loss_weight,
-            clip_loss_weight=args.coca_contrastive_loss_weight,
-            pad_token_id=tokenizer.pad_token_id,
-        )
-    elif args.loss == "caption":
-        criterion = CaptionLoss(pad_token_id=tokenizer.pad_token_id)
-        caption_loss_mask = tokenizer.caption_loss_mask  # type: ignore[attr-defined]
-    else:
-        raise ValueError("Unsupported loss")
 
     # Learning rate scaling
     lr = training_utils.scale_lr(args)
@@ -523,6 +586,21 @@ def train(args: argparse.Namespace) -> None:
         custom_layer_weight_decay=custom_layer_weight_decay,
         bias_lr=args.bias_lr,
     )
+
+    # Loss criteria
+    if args.loss == "clip":
+        criterion = CLIPLoss()
+    elif args.loss == "coca":
+        criterion = CoCaLoss(
+            caption_loss_weight=args.coca_caption_loss_weight,
+            clip_loss_weight=args.coca_contrastive_loss_weight,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+    elif args.loss == "caption":
+        criterion = CaptionLoss(pad_token_id=tokenizer.pad_token_id)
+        caption_loss_mask = tokenizer.caption_loss_mask  # type: ignore[attr-defined]
+    else:
+        raise ValueError("Unsupported loss")
 
     if args.lr_scheduler_update == "epoch":
         step_update = False
@@ -590,7 +668,9 @@ def train(args: argparse.Namespace) -> None:
     else:
         ema_warmup_steps = 0
 
-    logger.debug(f"EMA warmup steps = {ema_warmup_steps}")
+    if args.model_ema is True:
+        logger.debug(f"EMA warmup steps = {ema_warmup_steps}")
+
     net_without_ddp = net
     no_sync_cm = nullcontext
     if args.distributed is True and fsdp_mode is False:
@@ -600,23 +680,26 @@ def train(args: argparse.Namespace) -> None:
             find_unused_parameters=args.find_unused_parameters,
             broadcast_buffers=not args.no_broadcast_buffers,
         )
+        training_utils.register_ddp_comm_hook(net, args.ddp_comm_dtype)
         no_sync_cm = net.no_sync
         net_without_ddp = net.module
 
     if args.model_ema is True:
-        model_base = net_without_ddp
+        model_base = net_without_ddp  # Original model without DDP wrapper, will be saved as training state
         model_ema = training_utils.ema_model(args, net_without_ddp, device=device)
-        if args.load_states is True and training_states.ema_model_state is not None:
-            logger.info("Setting model EMA weights...")
+        if (args.load_states is True or args.load_ema is True) and training_states.ema_model_state is not None:
+            logger.info("Setting model EMA state...")
             if args.compile is True and hasattr(model_ema.module, "_orig_mod") is True:
                 model_ema.module._orig_mod.load_state_dict(training_states.ema_model_state)
             else:
                 model_ema.module.load_state_dict(training_states.ema_model_state)
 
-            model_ema.n_averaged += 1
+            assert training_states.extra_states is not None
+            model_ema.n_averaged.copy_(training_states.extra_states["ema_state"]["n_averaged"])
 
-        model_to_save = model_ema.module
-        eval_model = model_ema
+        model_ema.eval()
+        model_to_save = model_ema.module  # Save EMA model weights as default weights
+        eval_model = model_ema  # Use EMA for evaluation
 
     else:
         model_base = None
@@ -680,6 +763,10 @@ def train(args: argparse.Namespace) -> None:
     #
     optimizer_step = (begin_epoch - 1) * optimizer_steps_per_epoch
     if virtual_epoch_mode is True:
+        # Virtual epochs share one continuous loader iterator, so initialize the NaFlex schedule before creating it
+        if naflex_batch_processor is not None:
+            naflex_batch_processor.set_epoch(begin_epoch)
+
         train_iter = iter(training_loader)
 
     running_loss = training_utils.SmoothedValue(window_size=64)
@@ -695,6 +782,9 @@ def train(args: argparse.Namespace) -> None:
         net.train()
         if args.freeze_image_encoder is True:
             training_utils.unwrap_compiled_module(net_without_ddp).image_encoder.eval()
+
+        if naflex_batch_processor is not None and virtual_epoch_mode is False:
+            naflex_batch_processor.set_epoch(epoch)
 
         # Clear metrics
         running_loss.clear()
@@ -724,9 +814,17 @@ def train(args: argparse.Namespace) -> None:
         else:
             batch_iter = enumerate(training_loader)
 
-        accum_batches: list[tuple[torch.Tensor, torch.Tensor]] = []
+        accum_batches: list[tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]] = []
         accum_features: dict[str, list[torch.Tensor]] = {"image_features": [], "text_features": []}
         for i, (_, images, texts) in batch_iter:
+            batch_kwargs: dict[str, torch.Tensor] = {}
+            if args.naflex is True:
+                images, grid_sizes, valid_mask = images
+                batch_kwargs = {
+                    "grid_sizes": grid_sizes.to(device, non_blocking=True),
+                    "valid_mask": valid_mask.to(device, non_blocking=True),
+                }
+
             images = images.to(device, dtype=model_dtype, non_blocking=True)
             texts = texts.to(device, non_blocking=True)
 
@@ -742,18 +840,18 @@ def train(args: argparse.Namespace) -> None:
 
                 with torch.no_grad():
                     with torch.amp.autocast(device.type, enabled=args.amp, dtype=amp_dtype):
-                        model_out = net(images, texts, return_features=True)
+                        model_out = net(images, texts, return_features=True, **batch_kwargs)
                         accum_features["image_features"].append(model_out["image_features"])
                         accum_features["text_features"].append(model_out["text_features"])
 
-                accum_batches.append((images, texts))
+                accum_batches.append((images, texts, batch_kwargs))
                 if optimizer_update is False:
                     progress.update(n=batch_size * args.world_size)
                     continue
 
                 optimizer.zero_grad()
                 replay_losses: list[torch.Tensor] = []
-                for j, (accum_images, accum_texts) in enumerate(accum_batches):
+                for j, (accum_images, accum_texts, accum_kwargs) in enumerate(accum_batches):
                     replay_requires_gradient_sync = j == len(accum_batches) - 1
                     sync_context = no_sync_cm if replay_requires_gradient_sync is False else nullcontext
                     if fsdp_mode is True:
@@ -763,7 +861,7 @@ def train(args: argparse.Namespace) -> None:
 
                     with sync_context():
                         with torch.amp.autocast(device.type, enabled=args.amp, dtype=amp_dtype):
-                            model_out = net(accum_images, accum_texts, return_features=True)
+                            model_out = net(accum_images, accum_texts, return_features=True, **accum_kwargs)
                             image_features = torch.concat(
                                 accum_features["image_features"][:j]
                                 + [model_out["image_features"]]
@@ -813,7 +911,7 @@ def train(args: argparse.Namespace) -> None:
                 # Forward and backward
                 with sync_context():
                     with torch.amp.autocast(device.type, enabled=args.amp, dtype=amp_dtype):
-                        model_out = net(images, texts, return_features=True)
+                        model_out = net(images, texts, return_features=True, **batch_kwargs)
                         if args.loss == "coca":
                             losses = criterion(
                                 image_features=model_out["image_features"],
@@ -827,7 +925,7 @@ def train(args: argparse.Namespace) -> None:
                             losses = criterion(
                                 logits=model_out["logits"],
                                 texts=texts,
-                                target_mask=caption_loss_mask(texts),  # pylint: disable=used-before-assignment
+                                target_mask=caption_loss_mask(texts),  # pylint: disable=possibly-used-before-assignment
                             )
                         else:
                             losses = criterion(
@@ -944,11 +1042,19 @@ def train(args: argparse.Namespace) -> None:
             epoch_start = time.time()
             with torch.inference_mode():
                 for _, images, texts in validation_loader:
+                    batch_kwargs = {}
+                    if args.naflex is True:
+                        images, grid_sizes, valid_mask = images
+                        batch_kwargs = {
+                            "grid_sizes": grid_sizes.to(device, non_blocking=True),
+                            "valid_mask": valid_mask.to(device, non_blocking=True),
+                        }
+
                     images = images.to(device, dtype=model_dtype, non_blocking=True)
                     texts = texts.to(device, non_blocking=True)
 
                     with torch.amp.autocast(device.type, enabled=args.amp, dtype=amp_dtype):
-                        model_out = eval_model(images, texts, return_features=True)
+                        model_out = eval_model(images, texts, return_features=True, **batch_kwargs)
                         if args.loss == "coca":
                             losses = criterion(
                                 image_features=model_out["image_features"],
@@ -1010,6 +1116,10 @@ def train(args: argparse.Namespace) -> None:
 
         # Checkpoint model
         if epoch % args.save_frequency == 0:
+            extra_states = {}
+            if args.model_ema is True:
+                extra_states["ema_state"] = {"n_averaged": model_ema.n_averaged}
+
             clip_training_utils.save_training_checkpoint(
                 args,
                 network_name,
@@ -1022,6 +1132,7 @@ def train(args: argparse.Namespace) -> None:
                 scaler,
                 model_base,
                 fsdp_mode=fsdp_mode,
+                **extra_states,
             )
             if args.keep_last is not None and training_utils.is_global_primary(args) is True:
                 fs_ops.clean_checkpoints(network_name, args.keep_last)
@@ -1031,39 +1142,14 @@ def train(args: argparse.Namespace) -> None:
         logger.info(f"Total time: {format_duration(toc - tic)}")
         logger.info("---")
 
-    # Save model hyperparameters with metrics
-    if training_utils.is_global_primary(args) is True:
-        # Replace list/dict based args
-        if args.opt_betas is not None:
-            for idx, beta in enumerate(args.opt_betas):
-                setattr(args, f"opt_betas_{idx}", beta)
-
-            del args.opt_betas
-
-        if args.lr_steps is not None:
-            args.lr_steps = json.dumps(args.lr_steps)
-        if args.model_config is not None:
-            args.model_config = json.dumps(args.model_config)
-        if args.image_encoder_config is not None:
-            args.image_encoder_config = json.dumps(args.image_encoder_config)
-        if args.text_encoder_config is not None:
-            args.text_encoder_config = json.dumps(args.text_encoder_config)
-        if args.text_decoder_config is not None:
-            args.text_decoder_config = json.dumps(args.text_decoder_config)
-        if args.size is not None:
-            args.size = json.dumps(args.size)
-
-        metrics = {"hparam/loss": running_loss.global_avg}
-        if running_val_loss.count > 0:
-            metrics["hparam/val_loss"] = running_val_loss.global_avg
-
-        # Save all args
-        summary_writer.add_hparams({**vars(args), "training_samples": len(training_dataset)}, metrics)
-
     summary_writer.close()
 
     # Checkpoint model
     if epoch >= begin_epoch:
+        extra_states = {}
+        if args.model_ema is True:
+            extra_states["ema_state"] = {"n_averaged": model_ema.n_averaged}
+
         clip_training_utils.save_training_checkpoint(
             args,
             network_name,
@@ -1076,6 +1162,7 @@ def train(args: argparse.Namespace) -> None:
             scaler,
             model_base,
             fsdp_mode=fsdp_mode,
+            **extra_states,
         )
 
     training_utils.shutdown_distributed_mode(args)
@@ -1168,7 +1255,7 @@ def get_args_parser() -> argparse.ArgumentParser:
     training_cli.add_precision_args(parser)
     training_cli.add_grad_checkpointing_args(parser)
     training_cli.add_compile_args(parser)
-    training_cli.add_checkpoint_args(parser)
+    training_cli.add_checkpoint_args(parser, load_ema=True)
     training_cli.add_distributed_args(parser)
     training_cli.add_logging_and_debug_args(parser)
     training_cli.add_training_data_args(parser)
@@ -1177,11 +1264,40 @@ def get_args_parser() -> argparse.ArgumentParser:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    # NOTE: Top-level model options are controlled by dedicated CLI arguments, not by --model-config
-
     args.size = cli.parse_size(args.size)
+
+    # This will capture the common argument mistakes
     training_cli.common_args_validation(args)
 
+    # Script specific checks
+    if registry.exists(args.network, task=Task.IMAGE_TEXT) is False:
+        raise cli.ValidationError(f"--network {args.network} not supported, see list-models tool for available options")
+
+    if args.image_encoder_pretrained is not None and args.resume_epoch is not None:
+        raise cli.ValidationError("--image-encoder-pretrained cannot be used with --resume-epoch")
+    if args.pretrained is True and args.image_encoder_pretrained is not None:
+        raise cli.ValidationError("--image-encoder-pretrained cannot be used with --pretrained")
+
+    if args.embed_dim is not None and args.embed_dim <= 0:
+        raise cli.ValidationError("--embed-dim must be positive")
+    if args.context_length is not None and args.context_length <= 0:
+        raise cli.ValidationError("--context-length must be positive")
+
+    if args.grad_accum_cache_negatives is True and args.grad_accum_steps == 1:
+        raise cli.ValidationError("--grad-accum-cache-negatives requires --grad-accum-steps greater than 1")
+    if args.grad_accum_cache_negatives is True and args.loss != "clip":
+        raise cli.ValidationError("--grad-accum-cache-negatives is only supported with --loss clip")
+
+    if args.coca_caption_loss_weight < 0.0:
+        raise cli.ValidationError("--coca-caption-loss-weight must be non-negative")
+    if args.coca_contrastive_loss_weight < 0.0:
+        raise cli.ValidationError("--coca-contrastive-loss-weight must be non-negative")
+
+    if args.openvision_v2_keep_ratio is not None:
+        if args.openvision_v2_keep_ratio <= 0.0 or args.openvision_v2_keep_ratio > 1.0:
+            raise cli.ValidationError("--openvision-v2-keep-ratio must be in range of (0, 1]")
+
+    # NOTE: Top-level model options are controlled by dedicated CLI arguments, not by --model-config
     reserved_model_config_keys = lib.get_reserved_model_config_keys(args.model_config)
     if len(reserved_model_config_keys) > 0:
         raise cli.ValidationError(
@@ -1195,19 +1311,6 @@ def validate_args(args: argparse.Namespace) -> None:
         raise cli.ValidationError("--text-encoder-config cannot contain context_length, use --context-length")
     if args.text_decoder_config is not None and "context_length" in args.text_decoder_config:
         raise cli.ValidationError("--text-decoder-config cannot contain context_length, use --context-length")
-
-    if args.wds is True and args.data_path is None and args.wds_info is None:
-        raise cli.ValidationError("Must provide at least one data source, --data-path or --wds-info")
-    if args.wds is True and args.wds_info is not None and args.val_path is not None:
-        raise cli.ValidationError("--val-path cannot be used with --wds-info")
-    if args.rgb_mean is not None and len(args.rgb_mean) != args.channels:
-        raise cli.ValidationError(f"--rgb-mean must have {args.channels} values, got {len(args.rgb_mean)}")
-    if args.rgb_std is not None and len(args.rgb_std) != args.channels:
-        raise cli.ValidationError(f"--rgb-std must have {args.channels} values, got {len(args.rgb_std)}")
-    if args.resize_min_scale is not None and (args.resize_min_scale <= 0.0 or args.resize_min_scale >= 1.0):
-        raise cli.ValidationError(f"--resize-min-scale must be in range of (0, 1.0), got {args.resize_min_scale}")
-    if args.center_crop > 1 or args.center_crop <= 0.0:
-        raise cli.ValidationError(f"--center-crop must be in range of (0, 1.0], got {args.center_crop}")
 
 
 def args_from_dict(**kwargs: Any) -> argparse.Namespace:

@@ -69,7 +69,13 @@ class BaseNet(nn.Module):
         raise RuntimeError(f"{self.__class__.__name__} does not support gradient checkpointing")
 
     def forward(
-        self, image: torch.Tensor, text: torch.Tensor, *, return_features: bool = False
+        self,
+        image: torch.Tensor,
+        text: torch.Tensor,
+        *,
+        return_features: bool = False,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor | dict[str, Optional[torch.Tensor]]:
         raise NotImplementedError
 
@@ -84,7 +90,14 @@ class BaseNet(nn.Module):
 
 
 class ZeroShotMixin:
-    def encode_image(self, image: torch.Tensor, normalize: bool = False) -> torch.Tensor:
+    def encode_image(
+        self,
+        image: torch.Tensor,
+        normalize: bool = False,
+        *,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         raise NotImplementedError
 
     def encode_text(self, text: torch.Tensor, normalize: bool = False) -> torch.Tensor:
@@ -97,10 +110,24 @@ class ZeroShotMixin:
 class CaptionGeneratorMixin:
     text_decoder: TextDecoderBaseNet
 
-    def forward_caption_features(self, image: torch.Tensor, text: torch.Tensor) -> torch.Tensor:
+    def forward_caption_features(
+        self,
+        image: torch.Tensor,
+        text: torch.Tensor,
+        *,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         raise NotImplementedError
 
-    def forward_caption_logits(self, image: torch.Tensor, text: torch.Tensor) -> torch.Tensor:
+    def forward_caption_logits(
+        self,
+        image: torch.Tensor,
+        text: torch.Tensor,
+        *,
+        grid_sizes: Optional[torch.Tensor] = None,
+        valid_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         raise NotImplementedError
 
     @staticmethod

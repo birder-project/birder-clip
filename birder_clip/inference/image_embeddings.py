@@ -32,12 +32,20 @@ def infer_dataloader_iter(
     sample_count = 0
     with tqdm(total=num_samples, initial=0, unit="images", unit_scale=True, leave=False) as progress:
         for file_paths, inputs, _targets in dataloader:
+            batch_kwargs = {}
+            if isinstance(inputs, (tuple, list)):  # Assumes NaFlex collator inputs
+                inputs, grid_sizes, valid_mask = inputs
+                batch_kwargs = {
+                    "grid_sizes": grid_sizes.to(device, non_blocking=True),
+                    "valid_mask": valid_mask.to(device, non_blocking=True),
+                }
+
             batch_size = inputs.size(0)
 
             # Inference
             inputs = inputs.to(device, dtype=model_dtype)
             with torch.amp.autocast(device.type, enabled=amp, dtype=amp_dtype):
-                embeddings = net.encode_image(inputs, normalize=True)
+                embeddings = net.encode_image(inputs, normalize=True, **batch_kwargs)
                 embeddings = embeddings.cpu().float().numpy()
 
             embeddings_list.append(embeddings)

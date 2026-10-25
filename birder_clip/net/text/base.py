@@ -146,18 +146,26 @@ class CrossAttentionTextDecoderBaseNet(TextDecoderBaseNet):
 
 
 class VisualCausalTextDecoderBaseNet(TextDecoderBaseNet):
-    def forward_features(self, text: torch.Tensor, image_tokens: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
-
-    def forward_features_from_embeddings(
-        self, text_embeddings: torch.Tensor, image_tokens: torch.Tensor
+    def forward_features(
+        self, text: torch.Tensor, image_tokens: torch.Tensor, image_valid_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def forward_from_embeddings(self, text_embeddings: torch.Tensor, image_tokens: torch.Tensor) -> torch.Tensor:
-        features = self.forward_features_from_embeddings(text_embeddings, image_tokens)
+    def forward_features_from_embeddings(
+        self, text_embeddings: torch.Tensor, image_tokens: torch.Tensor, image_valid_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
+    def forward_from_embeddings(
+        self, text_embeddings: torch.Tensor, image_tokens: torch.Tensor, image_valid_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        features = self.forward_features_from_embeddings(
+            text_embeddings, image_tokens, image_valid_mask=image_valid_mask
+        )
         return self.forward_head(features)
 
-    def forward(self, text: torch.Tensor, image_tokens: torch.Tensor) -> torch.Tensor:
-        features = self.forward_features(text, image_tokens)
+    def forward(
+        self, text: torch.Tensor, image_tokens: torch.Tensor, image_valid_mask: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        features = self.forward_features(text, image_tokens, image_valid_mask=image_valid_mask)
         return self.forward_head(features)
